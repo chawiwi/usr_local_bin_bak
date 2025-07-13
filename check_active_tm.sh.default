@@ -1,0 +1,54 @@
+#!/bin/bash
+
+#UNCOMMENT ONE OF THE SFC LOCATIONS
+# SFC_Location="/SFC/NetApp/Status/test.txt" #L10
+# SFC_Location="/SFC/L15/Status/test.txt" #L11
+WEBHOOK_URL="http://192.168.66.108:5555/webhook"
+PXE="PXE IP HERE"
+STATUS="Test Monitor Down"
+PAYLOAD=$(cat <<EOF
+{
+  "PXE": "$PXE",
+  "Status": "$STATUS"
+}
+EOF
+)
+
+send_email() {
+
+    curl -X POST -H "Content-Type: application/json" -d "$PAYLOAD" "$WEBHOOK_URL"
+}
+
+touch "$SFC_Location"
+
+# Check if the file exists
+if [ ! -f "$SFC_Location" ]; then
+    # Retry if the file doesn't exist
+    retries=0
+    max_retries=3
+    delay=1
+    while [ ! -f "$SFC_Location" ] && [ $retries -lt $max_retries ]; do
+        ((retries++))
+        sleep $delay
+    done
+
+    # If the file is still not found after retries, exit
+    if [ ! -f "$SFC_Location" ]; then
+        send_email
+        exit 1
+    fi
+fi
+
+# Wait for 60 seconds
+sleep 60
+
+# Check if the file still exists
+if [ -f "$SFC_Location" ]; then
+    # Call function to send email
+    send_email
+else
+    echo "Test Monitoring Working"
+fi
+
+exit 0
+

@@ -1,0 +1,53 @@
+#!/usr/bin/env python3
+
+import os
+import sys
+from util.input import get_sns
+from util.fs import find_all
+from util.sf import parse_config_file
+from util.net import normalize_mac
+
+
+def main():
+    sns = get_sns()
+
+    directory = None
+    config_path = None
+    output_path = None
+    if len(sys.argv) > 2:
+        directory = sys.argv[1].upper()
+        config_path = f"/WIN/{directory}/response/config/"
+        output_path = f"/WIN/{directory}/MDAAS/"
+
+        # Ensure output directory exists
+        if not os.path.exists(output_path):
+            os.makedirs(output_path)
+
+    while True:
+        serial_number = sns.pop()
+        active_config_path = config_path
+        if directory is None:
+            active_config_path = find_all(f"{serial_number}.txt", use_cache=True)[0]
+
+        config_data = parse_config_file(active_config_path)
+        eth0_value = config_data.get("ETH0")
+
+        if directory is None:
+            # Try reading from the config path
+            folder = active_config_path.split("/WIN/")[1].split("/")[0]
+            output_path = f"/WIN/{folder}/MDAAS/"
+
+        formatted_eth0 = normalize_mac(eth0_value)
+
+        # Write to output file
+        with open(
+            os.path.join(output_path, f"{serial_number}.txt"), "w"
+        ) as output_file:
+            output_file.write(formatted_eth0 + "\n")
+
+        if len(sns) == 0:
+            break
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,45 @@
+#!/bin/bash
+
+# Define the hostname
+HOSTNAME="XXX.XXX.XXX.XXX"
+SHARE_NAME_WIN="share_win"
+MOUNT_POINT_WIN="/WIN"
+SHARE_NAME_SFC="share_sfc"
+MOUNT_POINT_SFC="/SFC"
+USERNAME="test"
+PASSWORD="qcitest"
+
+# Check if $MOUNT_POINT is mounted
+if mountpoint -q $MOUNT_POINT_WIN; then
+    echo "$MOUNT_POINT_WIN is already mounted."
+else
+    # Run mount script
+    echo "Mounting $MOUNT_POINT_WIN..."
+    # Add your mount command here
+    sudo mount -t cifs //$HOSTNAME/$SHARE_NAME_WIN $MOUNT_POINT_WIN -o username=$USERNAME,password=$PASSWORD
+
+    # Check if the mount was successful
+    if [ $? -eq 0 ]; then
+        echo "$MOUNT_POINT_WIN mounted successfully."
+    else
+        echo "Failed to mount $MOUNT_POINT_WIN. Check your mount command."
+    fi
+fi
+
+
+# Check if $MOUNT_POINT is mounted
+if mountpoint -q $MOUNT_POINT_SFC; then
+    echo "$MOUNT_POINT_SFC is already mounted."
+else
+    # Run mount script
+    echo "Mounting $MOUNT_POINT_SFC..."
+    # Add your mount command here
+    sudo mount -t cifs //$HOSTNAME/$SHARE_NAME_SFC $MOUNT_POINT_SFC -o username=$USERNAME,password=$PASSWORD
+
+    # Check if the mount was successful
+    if [ $? -eq 0 ]; then
+        echo "$MOUNT_POINT_SFC mounted successfully."
+    else
+        echo "Failed to mount $MOUNT_POINT_SFC. Check your mount command."
+    fi
+fi

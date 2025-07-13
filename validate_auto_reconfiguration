@@ -1,0 +1,207 @@
+#!/usr/bin/env python3
+import sys
+import os
+import subprocess
+import time
+
+file_path = os.path.abspath(__file__)
+root_path, filename = os.path.split(file_path)
+auto_reconfig_service_server_loc = f"{root_path}/auto_reconfig/SoCFPGATestSvc.service"
+auto_reconfig_python_server_loc = f"{root_path}/auto_reconfig/fpga.py"
+auto_reconfig_service_soc_loc = (
+    "/vol/data/persistent/tests/systemd/SoCFPGATestSvc.service"
+)
+auto_reconfig_python_soc_loc = "/vol/data/persistent/tests/fpga.py"
+cmd_copy_auto_service_to_loc_path = (
+    f"cp -rf /tmp/SoCFPGATestSvc.service {auto_reconfig_service_soc_loc}"
+)
+cmd_copy_auto_python_to_loc_path = f"cp -rf /tmp/fpga.py {auto_reconfig_python_soc_loc}"
+
+
+def main():
+    if len(sys.argv) == 1:
+        print("Usage: validate_auto_reconfiguration <sn>")
+        exit(1)
+
+    sn = sys.argv[1]
+    result = get_result(f"find /WIN/ -name {sn}.txt | grep -i response/config")
+    items = result.strip().split("\n")
+    config_path = items[0]
+    if len(items) > 1:
+        print("Multiple configuration files detected")
+        print("Please choose the correct project or configuration file:")
+        for i in range(0, len(items) - 1):
+            print(f"{i}: {items[i]}")
+
+        result = items[int(input())]
+    elif len(items) == 0:
+        print("No configuration file found")
+        exit(1)
+
+    config_data = {}
+    try:
+        with open(config_path, "r") as f:
+            for line in f:
+                if "=" in line:
+                    key, value = line.split("=")
+                    config_data[key] = value.strip()
+    except:
+        print("Configuration file not found")
+        exit(1)
+
+    print(f"Config file used: {config_path}")
+
+    # calculate ip addresses
+    for key in config_data:
+        if "ETH" in key and "MICROSOFT" in config_data[key].upper():
+            config_data["cp_mac_addr"] = config_data[key].split(",")[0].strip()
+            break
+
+    print("Looking up IP address")
+    config_data["cp_ip"] = get_ip(config_data["cp_mac_addr"])
+    print(f"CP : {config_data['cp_ip']}\n")
+
+    if config_data["cp_ip"] is None:
+        print("IP address could not be found")
+        exit(1)
+
+    project = config_path.split("/")[1]
+
+    # verify that auto reconfiguration files exist to be copied
+    if not (
+        os.path.isfile(auto_reconfig_service_server_loc)
+        and os.path.isfile(auto_reconfig_python_server_loc)
+    ):
+        print(
+            "Could not find auto reconfiguration files. Please verify that the files exist"
+        )
+        exit(1)
+
+    # check that files exist on the server
+    service_file_exists = False
+    python_file_exists = False
+    print("Verifying server files")
+    result = get_result(
+        "sshpass -p overlake ssh -o 'StrictHostKeyChecking no' stuser@{0} \"echo overlake | sudo -S {1}\"".format(
+            config_data["cp_ip"], "find / -name *SoCFPGATestSvc.service*"
+        )
+    )
+    if auto_reconfig_service_soc_loc in result:
+        print("Service file exists in SOC")
+        service_file_exists = True
+    else:
+        print("Service file not found in SOC")
+
+    result = get_result(
+        "sshpass -p overlake ssh -o 'StrictHostKeyChecking no' stuser@{0} \"echo overlake | sudo -S {1}\"".format(
+            config_data["cp_ip"], "find / -name *fpga.py*"
+        )
+    )
+    if auto_reconfig_python_soc_loc in result:
+        print("Python file exists in SOC")
+        python_file_exists = True
+    else:
+        print("Python file not found in SOC")
+
+    if service_file_exists and python_file_exists:
+        print("SOC already has auto reconfiguration files")
+        exit(0)
+
+    print("Sending files")
+    send_file_to_console(
+        config_data["cp_ip"], auto_reconfig_service_server_loc, "/tmp/", config_data
+    )
+    send_file_to_console(
+        config_data["cp_ip"], auto_reconfig_python_server_loc, "/tmp/", config_data
+    )
+
+    print("Installing files")
+    get_result(
+        "sshpass -p overlake ssh -o 'StrictHostKeyChecking no' stuser@{} \"echo overlake | sudo -S /usr/bin/{}\"".format(
+            config_data["cp_ip"], "mkdir -p /vol/data/persistent/tests/systemd"
+        )
+    )
+    get_result(
+        "sshpass -p overlake ssh -o 'StrictHostKeyChecking no' stuser@{0} \"echo overlake | sudo -S {1}\"".format(
+            config_data["cp_ip"], cmd_copy_auto_service_to_loc_path
+        )
+    )
+    get_result(
+        "sshpass -p overlake ssh -o 'StrictHostKeyChecking no' stuser@{0} \"echo overlake | sudo -S {1}\"".format(
+            config_data["cp_ip"], cmd_copy_auto_python_to_loc_path
+        )
+    )
+
+    print("\nFiles sent. Reboot FPGA card now?")
+    response = input()
+    if len(response) > 0 and response[0].lower() == "y":
+        get_result(
+            "sshpass -p overlake ssh -o 'StrictHostKeyChecking no' stuser@{0} \"echo overlake | sudo -S /usr/sbin/reboot\"".format(
+                config_data["cp_ip"]
+            )
+        )
+        print("FPGA card rebooted.")
+
+
+def get_result(run_cmd, ret="res"):
+    try:
+        p = subprocess.Popen(
+            run_cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            shell=True,
+            encoding="utf-8",
+        )
+        (res, err) = p.communicate()
+        if ret != "res":
+            res = p.returncode
+    except Exception as e:
+        print(f"Exception: {e}")
+    return res
+
+
+def send_file_to_console(ip, from_file, to_file, mbsn_dict):
+    result_str = "Another instance of"
+    while "Another instance of" in result_str:
+        cmdstr = "sshpass -p 'overlake' scp -o 'StrictHostKeyChecking no' -o UserKnownHostsFile=/dev/null {0} stuser@{1}:{2}".format(
+            from_file, ip, to_file
+        )
+        p = subprocess.Popen(
+            cmdstr, stdout=subprocess.PIPE, stderr=subprocess.PIPE, shell=True
+        )
+        stdout, stderr = p.communicate()
+        result = stdout.strip()
+        result_str = str(result)
+        time.sleep(1)
+    return result
+
+
+def get_ip(mac_addr):
+    mac_trans = (
+        mac_addr[:2]
+        + ":"
+        + mac_addr[2:4]
+        + ":"
+        + mac_addr[4:6]
+        + ":"
+        + mac_addr[6:8]
+        + ":"
+        + mac_addr[8:10]
+        + ":"
+        + mac_addr[10:12]
+    )
+    mac_trans = mac_trans.lower()
+
+    ip = get_result(
+        f"grep -B8 -A1 {mac_trans} /var/lib/dhcpd/dhcpd.leases | grep lease"
+    )
+    ip = ip.strip().split("{")
+    for line in ip:
+        if line != "":
+            line = line.split(" ")[1]
+            if get_result(f"ping -c 3 {line}", ret="code") == 0:
+                return line
+
+
+if __name__ == "__main__":
+    main()

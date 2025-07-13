@@ -1,0 +1,104 @@
+#!/usr/bin/env python3
+
+import sys
+import os
+from util.net import get_leased_ip, normalize_mac
+from util.fs import find_all
+
+
+def usage():
+    print("USAGE: gotoSwitch <serial number> (model)")
+    sys.exit(1)
+
+
+def ssh_into_switch(ip):
+    try:
+        # Using sshpass to handle password input and running the SSH session interactively
+        os.system(f"sshpass -p Temp123! ssh -o StrictHostKeyChecking=no admin@{ip}")
+    except Exception as e:
+        print(f"Error during SSH connection: {e}")
+
+
+def parse_switches(file_path, model):
+    switches = {}
+    data_switches = []
+
+    # Data Switches locations depending on Model
+    if model == "T6UB":
+        data_switches = ["SWITCHSMLC1", "SWITCHSMLC3"]
+    elif model in ["T6H", "T6G", "T6T"]:
+        data_switches = lambda key, val: "SWITCHSMLC" in key and "Arista" in val
+    elif model == "L15":
+        data_switches = ["SWITCHSMLC0", "SWITCHSMLC1"]
+    else:
+        data_switches = ["SWITCHSMLC0", "SWITCHSMLC1"]
+
+    try:
+        with open(file_path, "r") as file:
+            lines = file.readlines()
+
+            for line in lines:
+                if isinstance(data_switches, list):
+                    # Logging data switch info
+                    for switch in data_switches:
+                        if line.startswith(switch):
+                            parts = line.split(",")
+                            if len(parts) > 1:
+                                switches[parts[0].strip()] = parts[1].strip()
+                else:
+                    # Lambda filter
+                    if "=" in line:
+                        key, val = line.split("=")
+                        if data_switches(key, val):
+                            parts = line.split(",")
+                            if len(parts) > 1:
+                                switches[parts[0].strip()] = parts[1].strip()
+    except FileNotFoundError:
+        print(f"Error: File not found at {file_path}")
+        sys.exit(1)
+    return switches
+
+
+def main():
+    if len(sys.argv) < 2:
+        usage()
+
+    serial_number = sys.argv[1]
+    model = sys.argv[2] if len(sys.argv) > 2 else "T6UB"
+    if len(sys.argv) > 2:
+        file_path = f"/WIN/{model}/response/config/{serial_number}.txt"
+    else:
+        # get config and model dynamically
+        file_path = find_all(f"{serial_number}.txt")[0]
+        model = file_path.split("/WIN/")[1].split("/")[0]
+
+    switches = parse_switches(file_path, model)
+    switch_ips = {}
+
+    for switch, mac in switches.items():
+        ip = get_leased_ip(normalize_mac(mac))
+        if ip is None:
+            print(f"Error: Could not find IP for MAC address {mac}.")
+        switch_ips[switch] = ip
+
+    print("Select a switch to SSH into:")
+    switch_list = list(switches.items())
+
+    if not switch_list:
+        print("Error: No Switches found. ")
+        sys.exit(1)
+
+    for i, (switch, mac) in enumerate(switches.items(), 1):
+        print(f"{i}. {switch} - {mac} - {switch_ips[switch] or 'None'}")
+
+    choice = int(input("Enter the number of your choice: "))
+    if choice in range(1, len(switches) + 1):
+        selected_switch = list(switch_ips.values())[choice - 1]
+        ssh_into_switch(selected_switch)
+    else:
+        print("Invalid choice.")
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()

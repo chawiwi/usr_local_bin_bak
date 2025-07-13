@@ -1,0 +1,61 @@
+#!/usr/bin/env python3
+import subprocess
+import sys
+
+def get_serial_numbers():
+    """
+    Prompt the user to enter serial numbers separated by new lines.
+    Enter an empty line to finish the input.
+    """
+    print("Enter serial numbers (one per line). When finished, press Enter on an empty line:")
+    serials = []
+    while True:
+        line = input().strip()
+        if not line:
+            break
+        serials.append(line)
+    if not serials:
+        print("No serial numbers were entered.")
+        sys.exit(1)
+    return serials
+
+def run_find(serial):
+    """
+    Run the find command for a given serial number in /RACKLOG/Autolink/ 
+    and return a list of found files.
+    """
+    find_cmd = ["sudo", "find", "/RACKLOG/Autolink/", "-iname", "*{}*".format(serial)]
+    result = subprocess.run(find_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    if result.returncode != 0:
+        print(f"Error running find for serial {serial}: {result.stderr}")
+        return []
+    files = result.stdout.strip().splitlines()
+    return files
+
+def copy_files(files, serial):
+    """
+    Copy the found files to /SFC/Autolink/ and print the outcome.
+    """
+    cp_cmd = ["sudo", "cp", "-r"] + files + ["/SFC/Autolink/"]
+    result = subprocess.run(cp_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    if result.returncode == 0:
+        print(f"Copied files for serial {serial} successfully.")
+    else:
+        print(f"Failed to copy files for serial {serial}. Error: {result.stderr}")
+
+def main():
+    serial_numbers = get_serial_numbers()
+    for serial in serial_numbers:
+        print(f"\nProcessing serial: {serial}")
+        files = run_find(serial)
+        if not files:
+            print(f"Serial {serial} not found (no files matching the pattern).")
+        else:
+            print(f"Found the following files for serial {serial}:")
+            for f in files:
+                print(f"  {f}")
+            copy_files(files, serial)
+
+if __name__ == "__main__":
+    main()
+

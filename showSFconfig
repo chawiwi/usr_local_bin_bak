@@ -1,0 +1,78 @@
+#!/usr/bin/env python3
+
+
+import os
+import logging
+import subprocess
+import re
+
+ROOTPATH="/WIN/"
+SUBPATH="response/config"
+
+class changSFconfig():
+
+    def looking_configfile(filename):
+        file_location=[]
+        for each_file in filename:
+            for root,dirs,files in os.walk(ROOTPATH):
+                if each_file in files:
+                    if SUBPATH in root:
+                        file_location.append(os.path.join(root,each_file))
+        return file_location
+    def find_crrValue(location,stations):
+        dic_crr = {}
+        for file in location:
+            dic_crr[file]={}
+            for field in stations:
+                cmd = f"grep -e {field} {file}"
+                try:
+                    output_org = subprocess.check_output(cmd,shell=True).decode('utf-8').strip()
+                    output_line=output_org.splitlines()
+                    if len(output_line) > 1:
+                        for i in range(len(output_line)):
+                            station = output_line[i].split('=')[0]
+                            output = output_line[i].split('=')[1]
+                            dic_crr[file][station]=output.strip()
+                    else:
+                            station = output_org.split('=')[0]
+                            output = output_org.split('=')[1]
+                            dic_crr[file][station]=output.strip()
+                except subprocess.CalledProcessError as error:
+                    print("Command is none-zero exit status: exit code is", error.returncode)
+                    print("Error ouput: ", error.output)
+                    print("No Value Found")
+                    exit(1)
+        print(f"--------------------RESULT---------------------------")        
+        for key,value in dic_crr.items():
+            print(f"-----------------------------------------------------")
+            print(f"THE RESULT OF {key}")
+            for k,v in value.items():
+                print(f"The field '{k}' has value = '{v}'" )
+    def change_value(dic_oldvalue,new_value):   
+        for key,value in dic_oldvalue.items():
+            cmd = f"sed -i -e 's/{value}/{new_value}/g' {key}"
+            result=subprocess.run(cmd,shell=True,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
+        
+    if __name__ == '__main__':
+
+        inputs=[]
+        csn = input('Please Enter Serial Numbers of Servers:\n').strip()
+        while len(csn) != 0:
+            inputs.append(f'{csn}.txt'.strip())
+            csn = input()
+        
+        list_location=looking_configfile(inputs) 
+        if len(list_location) == 0:
+            logging.error(f'Can not find location of these file')
+            exit(1)
+        
+        values=[]
+        field=input('Enter the station in config file (ex:location).You can enter multiple fields:\n').strip().upper()
+        while len(field) != 0:
+            values.append(field.strip())
+            field = input().strip().upper()
+        find_crrValue(list_location,values)
+
+        exit(0)
+    
+

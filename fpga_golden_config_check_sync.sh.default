@@ -1,0 +1,45 @@
+#!/bin/bash
+PXEs=(
+    '202.20'
+    '202.21'
+    '202.24'
+    '202.26'
+    '202.46'
+    '202.47'
+)
+
+dryrun=true
+
+
+
+run_rsync() {
+    if [ "$dryrun" = true ]; then
+        dryrun_flag="--dry-run"
+    else
+        dryrun_flag=""
+    fi
+    for ip_destination in "${PXEs[@]}"; do
+        ssh_copy_cmd="ssh-copy-id root@192.168.$ip_destination"
+        #rsync_cmd="rsync -avu $dryrun_flag --chmod=777 -e ssh -o StrictHostKeyChecking=no --include='*/' --include='*do_record_cp_golden_image_version.log' --exclude='*.txt' --exclude='TOR*' --exclude='*chk_fpga_fw.log' --exclude='*chk_soc_fw.log' --exclude='*chk_uut_power_state.log' --exclude='*compare_public_key.log'  --exclude='*do_reconfig.log' --exclude='*first_update_soc_fw.log' --exclude='*monitor.log' --exclude='*_overlakeimg_flag_F21.log' --exclude='*updating.log' --exclude='*_rm_update_flag_F21.log' --exclude='*_rm_update_flag.log' --exclude='*cp_p*' --exclude='*_overlakeimg_flag.log' --exclude='*cp_auto_reconfig.log'  --exclude='*update_rm_fw.log' --exclude='*_rm_update_flag.log' --exclude='*update_soc_fw.log' /RACKLOG/l15/RM_logs/ root@192.168.$ip_destination:/RACKLOG/l15/RM_logs/"
+        expect -c "
+            spawn $ssh_copy_cmd
+            expect {
+                \"*continue connecting*\" {
+                    send \"yes\r\"
+                    exp_continue
+                }
+                eof
+            }
+        "
+        echo "Destination: $ip_destination"
+        rsync -avu $dryrun_flag --chmod=777 -e ssh --include='*/' --include='*do_record_cp_golden_image_version.log' --exclude='*_update_flag.log' --exclude='*.txt' --exclude='TOR*' --exclude='*chk_fpga_fw.log' --exclude='*chk_soc_fw.log' --exclude='*chk_uut_power_state.log' --exclude='*compare_public_key.log'  --exclude='*do_reconfig.log' --exclude='*first_update_soc_fw.log' --exclude='*monitor.log' --exclude='*_overlakeimg_flag_F21.log' --exclude='*updating.log' --exclude='*_rm_update_flag_F21.log' --exclude='*_rm_update_flag.log' --exclude='*cp_p*' --exclude='*_overlakeimg_flag.log' --exclude='*cp_auto_reconfig.log'  --exclude='*update_rm_fw.log' --exclude='*_rm_update_flag.log' --exclude='*update_soc_fw.log' /RACKLOG/l15/RM_logs/ root@192.168.$ip_destination:/RACKLOG/l15/RM_logs/
+        rsync_result=$?
+        if [ $rsync_result -eq 0 ]; then
+            echo "rsync completed successfully!"
+        else
+            echo "Error occurred while running rsync."
+        fi
+    done
+}
+
+run_rsync

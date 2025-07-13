@@ -1,0 +1,127 @@
+#!/usr/bin/env python3
+
+from re import sub
+import glob
+import subprocess
+import logging
+import os
+from isc_dhcp_leases import Lease, IscDhcpLeases
+
+WIN_FDR = '/WIN/'
+CFG_FDR = 'response/config'
+DHCPD_LEASES = '/var/lib/dhcpd/dhcpd.leases'
+c2789_location = { 'F38': 5,'F29': 4,'F21': 3,'F14': 2,'F05': 1,}
+
+# Ensure the MAC address is consistently formatted
+def to_macstr(mac: str):
+    # Remove anything after the first comma, if it exists
+    mac = mac.split(',')[0].strip()
+
+    # Ensure the MAC address is in the correct format
+    if len(mac) == 12 and ':' not in mac:
+        return ':'.join(mac[i:i+2] for i in range(0, len(mac), 2)).lower()
+
+    return mac.lower()
+
+# Find all files matching the name under the given path
+def find_all(name, path):
+    result = []
+    for root, dirs, files in os.walk(path):
+        if name in files:
+            if CFG_FDR in root:
+                result.append(os.path.join(root, name))
+    return result
+
+# Extract a value from a configuration file based on a key
+def getKeyFromSn(key, sn):
+    cfg_file = find_all(f'{sn}.txt', f'{WIN_FDR}')
+    if len(cfg_file) != 1:
+        logging.error(f'Cannot find serial number {sn}')
+        return None
+    
+    # We should get only one file
+    cfg_file = cfg_file[0]
+
+    # Extract the key value from the config file
+    cmd = f'grep -e \'^{key}=\' {cfg_file}'
+    try:
+        result = subprocess.check_output(cmd, shell=True).decode('utf-8').strip()
+        return result.split('=')[1]
+    except subprocess.CalledProcessError as e:
+        logging.error(f'Failed to extract key {key} from {cfg_file}: {e}')
+        return None
+
+# Find the RM IP address based on the serial number by looking up the MAC address in all DHCP leases
+def getRmIpFromSn(sn):
+    rm_mac = getKeyFromSn('RACK_MOUNT_MAC1', sn)
+    if rm_mac is None:
+        logging.error(f'Cannot find MAC address for serial number {sn}')
+        return None
+    
+    # Format the MAC address correctly
+    rm_mac = to_macstr(rm_mac)
+    
+    # Load all DHCP leases (not just the current active ones)
+    leases = IscDhcpLeases(DHCPD_LEASES)
+    all_leases = leases.get()
+
+    # Iterate through the list of leases
+    for lease in all_leases:
+        if lease.ethernet == rm_mac:
+            logging.info(f'Found IP {lease.ip} for MAC address {rm_mac}')
+            return lease.ip
+
+    logging.error(f'Cannot find IP for MAC address: {rm_mac}')
+    return None
+
+if __name__ == '__main__':
+    """ This program sends batch RM commands by arrays of serial numbers """
+    sns = []
+    line = input('Paste Arrays of Serial numbers (press enter twice if you copy from Test Monitor):\n').strip()
+    while len(str(line)) != 0:
+        sns.append(line.strip())
+        line = input()
+
+    # Search for RM MAC address by serial number
+    if len(sns) == 0:
+        logging.error('No serial number inputted')
+        exit(1)
+
+    # Get individual command
+    indv_cmd = input('Input the individual cmd (default: set system reset):')
+    if len(indv_cmd) == 0:
+        indv_cmd = 'set system reset'
+
+    rmip = None
+    slots = []
+    for sn in sns:
+        if rmip is None:
+            rmip = getRmIpFromSn(sn)
+            if rmip is None:
+                logging.error(f'Cannot find RM IP for serial number: {sn}')
+                continue
+
+        # Debug print to verify extracted MAC and IP
+        logging.info(f'Found RM IP: {rmip} for SN: {sn}')
+        
+        # Extract the location and model from the config file
+        location = getKeyFromSn('LOCATION', sn)
+        model = getKeyFromSn('PARTN', sn)
+        if location is not None:
+            if model == "C2789" or model == "C2189":
+                location = c2789_location.get(location, location)
+                slots.append(location)
+            else:    
+                slots.append(location[1:])
+
+    if len(slots) > 0:
+        cmd = f"sshpass -f /etc/rtp/rm_passwd ssh -o StrictHostKeyChecking=no root@{rmip}"
+        rmcmd = "{ "
+        for slot in slots:
+            rmcmd += f'echo "{indv_cmd} -i {slot}";'
+        rmcmd += " }"
+
+        final_cmd = rmcmd + '|' + cmd
+        print(f"Executing: {final_cmd}")
+        os.system(final_cmd)
+

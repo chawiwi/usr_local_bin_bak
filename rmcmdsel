@@ -1,0 +1,77 @@
+#!/usr/bin/env python3
+
+from util.input import get_sns, get_cmd
+from util.sf import get_key_from_sn
+from util.net import get_rm_ip_from_sn
+from util.consts import C2789_LOCATION
+from util.cmd import execute_cmd
+import logging
+import time
+
+if __name__ == "__main__":
+    """
+    This program send batch RM commands by arrays of serial number.
+    After 10 minutes, it clears the SEL for the servers.
+    """
+    sns = get_sns()
+    if len(sns) == 0:
+        logging.error("No serial number inputed")
+        exit(1)
+
+    rm_map = {}
+    cmd = get_cmd()
+
+    for sn in sns:
+        location = get_key_from_sn("LOCATION", sn, use_cache=True)
+        model = get_key_from_sn("PARTN", sn, use_cache=True)
+        if model is None or location is None:
+            continue
+
+        tries = 0
+        while tries < 3:
+            tries += 1
+            rm_ip = get_rm_ip_from_sn(sn, model, location, use_cache=True)
+            time.sleep(1)
+            if rm_ip is not None:
+                break
+
+        if rm_ip is None:
+            logging.error(f"Can not find RM IP from SN: {sn}")
+            continue
+
+        if rm_map.get(rm_ip) is None:
+            rm_map[rm_ip] = []
+
+        if location is not None:
+            if model == "C2789" or model == "C2189":
+                rm_map[rm_ip].append(str(C2789_LOCATION[location]))
+            else:
+                rm_map[rm_ip].append(location[1:])
+
+    def execute(cmd: str):
+        for ip, slots in rm_map.items():
+            print(f"{ip} - {','.join(slots)}")
+            if len(slots) == 0:
+                continue
+            execute_cmd(
+                cmd=[
+                    "sshpass",
+                    "-f",
+                    "/etc/rtp/rm_passwd",
+                    "ssh",
+                    "-o",
+                    "StrictHostKeyChecking=no",
+                    f"root@{ip}",
+                ],
+                initial_input="\n".join([f"{cmd} -i {slot}" for slot in slots]),
+                show_output=True,
+            )
+
+    execute("set manager port off" if cmd == "ac" else cmd)
+    if cmd == "ac":
+        time.sleep(60)
+        execute("set manager port on")
+
+    time.sleep(600)
+    print("Executing SEL clear")
+    execute("set system cmd -c sel clear")

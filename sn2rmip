@@ -1,0 +1,98 @@
+#!/bin/bash
+# echo $0 [SN]
+
+. ./color_def
+
+path=$(find /WIN/ -name $1.txt|grep -i response/config)
+
+if (($(grep -c . <<<"$path") > 1 )); then
+	echo -e "${Yellow}MULTIPLE Config files found!"
+	echo -e "===============================${NC}"
+	#IFS=" " read -ra file_array <<< "$path"
+	file_array=($(echo $path | tr "\n" "\n"))
+	#echo ${file_array[@]}
+	declare -i counter="0"
+	echo "Please choose the correct project or configuration file: "
+	for file in "${file_array[@]}"
+	do
+		echo -e "${Green}$counter${NC}: $file"
+		counter+=1
+	done
+	echo -e "${Orange}Select the number associated with the file:${NC}"
+	read selection
+	#echo -e "${LGreen}$selection ${NC} was selected!"
+	path=${file_array[$selection]}
+elif (($(grep -c . <<<"$path") == 1 )); then
+	echo "SINGLE CONFIG FILE FOUND"
+	echo "================================"
+else
+	echo -e "${LRed}NO CONFIG FILE FOUND!${NC}"
+	echo "================================"
+	echo "You might be in the wrong pxe or you're using the wrong SN!"
+	exit 1
+
+fi
+
+echo -e "Config file used: ${LCyan}$path${NC}"
+if [ "$1" == "-d" ]; then
+	BMCMAC=$(cat $path|grep ETH0)
+	MAC=${BMCMAC:5:2}:${BMCMAC:7:2}:${BMCMAC:9:2}:${BMCMAC:11:2}:${BMCMAC:13:2}:${BMCMAC:15:2}
+elif [ "$1" == "-s" ]; then
+	BMCMAC=$(cat $path|grep SWITCHMAC)
+	if [ -z "$BMCMAC" ];then
+		echo -e "${LRed}Wasn't able to find a a switch MAC within the config file.${NC}"
+		exit 1
+	fi
+	#echo $BMCMAC
+	MAC=${BMCMAC:10:2}:${BMCMAC:12:2}:${BMCMAC:14:2}:${BMCMAC:16:2}:${BMCMAC:18:2}:${BMCMAC:20:2}
+elif [ "$1" == "-l10" ]; then
+	MAC=$2
+	echo $MAC
+else
+	BMCMAC=$(cat $path|grep RACK_MOUNT_MAC1)
+	MAC=${BMCMAC:16:2}:${BMCMAC:18:2}:${BMCMAC:20:2}:${BMCMAC:22:2}:${BMCMAC:24:2}:${BMCMAC:26:2}
+fi
+echo -e "MAC Address found: ${LCyan}$MAC${NC}"
+#ip=$(ip neigh|grep -v fe|grep -i $MAC| cut -d " " -f1)
+ip=$(cat /var/lib/dhcpd/dhcpd.leases | grep -i $MAC -B8 | grep lease |cut -d " " -f2)
+#readarray -t ip <<<"$raw_ip"
+#echo "IP found: $ip"
+ip=($(echo $ip | tr "\n" "\n"))
+
+
+if [ -z "$ip" ];then 
+	echo -e "${Yellow}Could not find anything in IP neighbor. Trying dhcpd leases...${NC}"
+	line_number=$(grep $MAC -i -n /var/lib/dhcpd/dhcpd.leases)
+	IFS=":" read -ra split<<< "$line_number"
+	line_number=$((${split[0]}-6))
+	line=$(cat -n /var/lib/dhcpd/dhcpd.leases|grep $line_number)
+	IFS=" " read -ra split<<< "$line"
+	ip=${split[1]}
+
+elif [ ! -z "${ip[1]}" ];then
+	echo -e "${Yellow}Multiple Addresses were found:${NC}"
+  	declare -i counter="0"
+	#echo ${ip[2]}
+	for thing in "${ip[@]}"
+	do 
+		echo -e "${Green}$counter${NC}: $thing"
+		counter+=1
+	done
+	#echo "x: None of these"
+	echo -e "${Yellow}Please select the correct one: ${NC}"
+	read selection
+	#re='^[0-9]+$'
+	#if [ $selection == "x"]; then
+	#        echo "Checking DHCPD Leases!"
+	#        line_number=$(grep $MAC -i -n /var/lib/dhcpd/dhcpd.leases)
+	#        IFS=":" read -ra split<<< "$line_number"
+	#    	line_number=$((${split[0]}-6))
+	#        line=$(cat -n /var/lib/dhcpd/dhcpd.leases|grep $line_number)
+       # 	IFS=" " read -ra split<<< "$line"
+#	        ip=${split[1]}
+	ip=${ip[$selection]}
+	
+	echo -e "${LGreen}$ip${NC} was selected!"
+fi	 
+echo -e "IP Being used is: ${LGreen}$ip${NC}"
+

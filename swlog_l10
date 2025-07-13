@@ -1,0 +1,206 @@
+#!/bin/bash
+alias cp='cp'
+WINSVR="192.168.8.253"
+WINUSR="TMUserMSF@fab.com"
+WINPW="T3stMU55rmsf"
+UUTtoLX="/RACKLOG"       ##for log from uut
+WIN="/WIN"               ##log,res,req for UUT
+SFC="/SFC"               ##mount to WIN server for log,res,req
+SF_REQUEST_LOG=/var/log/sf_request.log
+# ModelLabel=(T6UB T6UC T6G T6UA_2U_MILAN)
+LOCKFILE="/var/run/swlog_l10.pid"
+
+
+do_not_run() {
+	echo "This script is not meant to be run on this host."
+	exit 1
+}
+
+chk_log_file() {
+    local logfile="$1"
+    local max_lines=500000
+    local line_count=$(wc -l < "$logfile")
+    if [ "$line_count" -gt "$max_lines" ]; then
+        echo "Trimming $logfile to the last $max_lines lines."
+        tail -n $max_lines "$logfile" > "${logfile}.tmp" && mv "${logfile}.tmp" "$logfile"
+    fi
+}
+
+is_pid_running() {
+    local pid=$1
+    if [ -z "$pid" ]; then
+        return 1
+    fi
+    if ps -p "$pid" > /dev/null; then
+        return 0
+    else
+        return 1
+    fi
+}
+
+cleanup() {
+    rm -f "$LOCKFILE"
+}
+trap cleanup EXIT
+
+log_message() {
+	level="${1}"
+	message="${2}"
+	timestamp="$(date '+%Y-%m-%d %H:%M:%S:%6N')"
+	if [[ $level == "INFO" ]]; then
+			echo "${timestamp} | ${level} | ${message}" >> $SF_REQUEST_LOG
+	else
+			echo "${timestamp} | ${level} | ${message}" | tee -a $SF_REQUEST_LOG
+	fi
+
+	chk_log_file "$SF_REQUEST_LOG"
+}
+
+mv_and_log() {
+	dir_pattern="${1}"
+	destination="${2}"
+	silent="${3}"
+
+	log_message "INFO" "ls ${dir_pattern} attempt."
+	stdout=$(mktemp)
+	stderr=$(mktemp)
+	ls ${dir_pattern} > >(tee "$stdout") 2> >(tee "$stderr" >&2)
+
+	files=($(<"$stdout"))
+	errors=$(<"$stderr")
+	if [[ ${#files[@]} == 0 ]]; then
+			log_message "WARNING" "issue with directory pattern [$dir_pattern]. possibly empty."
+	fi
+
+	if [[ "${errors}" != "" ]]; then
+			log_message "ERROR" "${errors}"
+	fi
+
+	for file in ${files[@]}; do
+		if [[ $silent == "cat" ]]; then
+			log_message "INFO" "***BEGIN $file***"
+			cat $file >> $SF_REQUEST_LOG
+			log_message "INFO" "***END $file ***"
+		fi
+		cmd="mv -f ${file} ${destination}"
+		$cmd 2>&1 | tee -a $SF_REQUEST_LOG 2>&1
+		if [ $? -eq 0 ]; then
+			log_message "INFO" "${file} moved to ${destination} successfully."
+		else
+			log_message "ERROR" "${file} failed to move to ${destination}"
+		fi
+	done
+}
+
+rsync_and_log() {
+	source_files="${1}"
+	destination="${2}"
+	ls ${source_files} > >(tee "$stdout") 2> >(tee "$stderr" >&2)
+	files=($(<"$stdout"))
+	errors=$(<"$stderr")
+	if [[ ${#files[@]} == 0 ]]; then
+		log_message "WARNING" "issue with directory pattern [$dir_pattern]. possibly empty."
+	fi
+	if [[ "${errors}" != "" ]]; then
+		log_message "ERROR" "${errors}"
+	fi
+
+	rsync_options="-av --backup --suffix='_$(date +'%Y%m%d_%H%M%S')'"
+
+	for file in ${files[@]}; do
+		log_message "INFO" "***BEGIN $file***"
+		cat $file >> $SF_REQUEST_LOG
+		log_message "INFO" "***END $file ***"
+		stdout=$(mktemp)
+		stderr=$(mktemp)
+		rsync $rsync_options "$file" "/home/issue_tracker/" > >(tee "$stdout") 2> >(tee "$stderr" >&2)
+		status=$?
+		stdout_content=($(<"$stdout"))
+		stderr_content=$(<"$stderr")
+		if [ ${status} -eq 0 ]; then
+			log_message "INFO" "rsync ${rsync_options} Success!"
+		else
+			log_message "ERROR" "rsync ${rsync_options} ***START."
+			log_message "ERROR" "stdout: ${stdout_content}"
+			readarray -t error_list <<< "${stderr_content}"
+			log_message "ERROR" "stderr: ${stderr_content}"
+			log_message "ERROR" "rsync ${rsync_options} ****END."
+		fi
+	done
+}
+
+do_cmd_and_log() {
+	cmd="${1}"
+	args="${2}"
+	stdout=$(mktemp)
+	stderr=$(mktemp)
+	$cmd $args > >(tee "$stdout") 2> >(tee "$stderr" >&2)
+	status=$?
+	echo "Executing: $cmd $args"
+	stdout_content=($(<"$stdout"))
+	stderr_content=$(<"$stderr")
+	if [ ${status} -eq 0 ]; then
+		log_message "INFO" "${cmd} ${args} Success!"
+	else
+		log_message "ERROR" "${cmd} ${args} ***START."
+		log_message "ERROR" "stdout: ${stdout_content}"
+		readarray -t error_list <<< "${stderr_content}"
+		log_message "ERROR" "stderr: ${stderr_content}"
+		log_message "ERROR" "${cmd} ${args} ****END."
+	fi
+	return $status
+}
+
+
+
+if [ -e "$LOCKFILE" ]; then
+    PID=$(cat "$LOCKFILE")
+    if is_pid_running "$PID"; then
+        echo "Another instance of the script is already running (PID: $PID). Exiting."
+        exit 1
+    else
+        rm -f "$LOCKFILE"
+    fi
+fi
+echo $$ > "$LOCKFILE"
+
+do_cmd_and_log "mountpoint" "$SFC"
+if [ $? -ne 0 ]; then
+	if [ ! -d "$SFC" ]; then
+		mkdir -p "$SFC"
+	fi
+	do_cmd_and_log "mount" "-tcifs "//$WINSVR/monitor" "$SFC" -ouser="$WINUSR",password="$WINPW",vers=2.0"
+	if [ $? -ne 0 ];then
+		echo "Can not mount to //$WINSVR/monitor in `date`"|tee -a "$UUTtoLX/Connection.LOG" $SF_REQUEST_LOG
+		echo "$SFC connection broken, Remountting...`date`"|tee -a "$UUTtoLX/Connection.LOG" $SF_REQUEST_LOG
+	fi
+fi
+
+MY_IPS=(`hostname -I`)
+# temporary. only Bulat's PXEs require swlog_l10. swlog_l10 should be removed soon.
+sw_log_ips=("192.168.202.16" "192.168.202.22")
+run=n
+for ip in ${sw_log_ips[@]}; do
+	if [[ " ${MY_IPS[@]} " =~ " ${ip} " ]]; then
+		run=y
+		break
+	fi
+done
+
+if [[ "$run" == "n" ]]; then
+	do_not_run
+fi
+
+# cronjob only runs per minutes, we need to 3 times for 15 second interval
+count=3
+for run in $(seq $count); do
+	find "$WIN/NetApp/Request/" -type f -name "*.txt" -size 0 -exec rm -v {} \;
+	mv_and_log "$WIN/NetApp/Request/*.txt" "$SFC/NetApp/Request/"
+	sleep 5
+	find "$SFC/NetApp/Response/" -type f -name "*.txt" -size 0 -exec rm -v {} \;
+	mv_and_log "$SFC/NetApp/Response/*.txt" "$WIN/NetApp/Response/"
+
+	find "$WIN/NetApp/Status/" -type f -name "*.txt" -size 0 -exec rm -v {} \;
+	mv_and_log "$WIN/NetApp/Status/*.txt" "$SFC/NetApp/Status/"
+	sleep 10
+done

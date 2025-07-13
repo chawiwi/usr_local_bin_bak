@@ -1,0 +1,68 @@
+#!/usr/bin/env python3
+
+import os
+import sys
+from util.input import get_sns
+from util.sf import get_key_from_sn
+from util.net import normalize_mac
+import logging
+
+logging.basicConfig(level=logging.INFO,format='%(levelname)s - %(message)s')
+
+class Colors:
+    HEADER = "\033[95m"
+    OKBLUE = "\033[94m"
+    OKCYAN = "\033[96m"
+    OKGREEN = "\033[92m"
+    WARNING = "\033[93m"
+    FAIL = "\033[91m"
+    RESET = "\033[0m"
+    BOLD = "\033[1m"
+    UNDERLINE = "\033[4m"
+
+def get_eth0(sn:str,key:str = "ETH0") -> str:
+    eth0_mac_sfc = ""
+    eth0_mac_sfc = get_key_from_sn(key,sn)
+    if not eth0_mac_sfc:
+        return None
+    eth0_mac = normalize_mac(eth0_mac_sfc.split(',')[0],sep="-")
+    return eth0_mac
+
+def remove_container(eth0_mac:str):
+    boot_container = f"{eth0_mac}_menu.ipxe"
+    boot_container_path = f"/home/container/ipxe/{boot_container}"
+    
+    if os.path.exists(boot_container_path):
+        logging.info(f"{Colors.OKCYAN}Removing boot file {boot_container}{Colors.RESET}")
+        try:
+            os.remove(boot_container_path)
+        except Exception as e:
+            logging.error(f"{Colors.FAIL}Failed to remove {boot_container}: {e}{Colors.RESET}")
+    else:
+        logging.info(f"{Colors.OKBLUE}No custom boot {boot_container} found under ipxe{Colors.RESET}")
+            
+def main():
+    sn_list = []
+    if len(sys.argv) >= 2:
+        for arg in sys.argv[1:]:
+            if arg.startswith('P') and arg.endswith('01E'):
+                sn = arg
+            else:
+                print(f"{Colors.FAIL}Usage: remove_bootfile | remove_bootfile [SN]{Colors.RESET}")
+                sys.exit()
+        eth0_mac = get_eth0(sn)
+        remove_container(eth0_mac)
+        sys.exit()
+    
+    sn_list = get_sns()
+    for sn in sn_list:
+        eth0_mac = get_eth0(sn)
+        if not eth0_mac:
+            logging.error(f"{Colors.FAIL}No ETH0 found in SFC for {sn}{Colors.RESET}")
+            continue
+        logging.info(f"{Colors.OKCYAN}Checking custom boots for {sn}{Colors.RESET}\n{Colors.OKBLUE}Mac = {eth0_mac}{Colors.RESET}")
+        print(f"{Colors.OKGREEN}{'='*80}{Colors.RESET}")
+        remove_container(eth0_mac)
+        
+if __name__ == "__main__":
+    main()

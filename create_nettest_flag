@@ -1,0 +1,119 @@
+#!/usr/bin/env python3
+
+import logging
+import os
+import glob
+from argparse import ArgumentParser
+from util.cmd import execute_cmd
+
+
+def count_files_with_string_in_name(directory, search_string):
+    count = 0
+    # Iterate through all files in the specified directory
+    for filename in os.listdir(directory):
+        # Check if the search_string is part of the filename
+        if f"_{search_string}" in filename and "PASS" in filename:
+            count += 1
+    return count
+
+
+if __name__ == "__main__":
+    parser = ArgumentParser(
+        "create_nettest_flag",
+        description="This program creates NETTEST flags.",
+    )
+    parser.add_argument("rackid", nargs="?", default=None)
+    parser.add_argument(
+        "-e",
+        "--expect",
+        type=int,
+        default=28,
+        help="The number of expected flags from the test",
+    )
+    parser.add_argument(
+        "-r",
+        "--retest",
+        type=int,
+        help="The number of servers still testing",
+    )
+    parser.add_argument(
+        "--no-double",
+        action="store_true",
+        help="Whether each existing flag should only count for one flag instead of two",
+    )
+    parser.add_argument(
+        "-f",
+        "--folder",
+        action="store",
+        default="100G",
+        help="Folder (100G, 50G, etc) to check"
+    )
+    parser.add_argument(
+        "-s",
+        "--sub",
+        action="store_true",
+        help="Whether to check rack id sub folder or check main folder for flags"
+    )
+    args = parser.parse_args()
+
+    rackid = (
+        args.rackid
+        if args.rackid
+        else input("Enter Rack ID to create flags for:\n").strip()
+    )
+
+    if len(rackid) == 0:
+        logging.error("No rack ID inputed")
+        exit(1)
+
+    # Determine project from rack id
+    try:
+        out, _err, _code = execute_cmd(
+            ["grep", rackid, "-r", *glob.glob("/WIN/*/response/config")]
+        )
+        project = out.splitlines()[0].split("/WIN/")[1].split("/")[0]
+    except:
+        print("Unable to detect project from rack ID")
+        project = "T6H"
+
+    flag_directory = f"/WIN/{project}/{args.folder}/"
+    if args.sub:
+        flag_directory = os.path.join(flag_directory, rackid)
+
+    # Create A/B flags
+    print("Creating RM flags")
+    execute_cmd(["touch", os.path.join(flag_directory, f"{rackid}_A.txt")])
+    execute_cmd(["touch", os.path.join(flag_directory, f"{rackid}_B.txt")])
+
+    # count NETTEST pass flags
+    existing_count = count_files_with_string_in_name(flag_directory, rackid)
+    print(f'Number of files containing "{rackid}" in their name: {existing_count}')
+
+    # Create additional flags if less than 28
+    retest_count = (
+        args.retest
+        if args.retest is not None
+        else input("Number of servers retesting?")
+    )
+    retest_count = int(retest_count) * (1 if args.no_double else 2)
+    if existing_count < args.expect - retest_count:
+        r = existing_count
+        x = 10
+        while r < args.expect - retest_count:
+            execute_cmd(
+                [
+                    "touch",
+                    os.path.join(
+                        flag_directory,
+                        f"SERVER_{rackid}_P030443660040{x}_F11_eth0.PASS.NETTEST",
+                    ),
+                ]
+            )
+            r += 1
+            x += 1
+
+        # Calculate the number of flags created
+        y = args.expect - existing_count - retest_count
+        print(f"{y} flags have been created")
+    else:
+        print("No flags have been created")

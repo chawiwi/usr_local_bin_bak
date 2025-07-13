@@ -1,0 +1,54 @@
+#!/usr/bin/env python3
+import sys
+from argparse import ArgumentParser
+from util.web_api import api_get_config
+from util.net import normalize_mac, get_leased_ip
+
+
+def get_mac_addresses_from_config(sn: str):
+    config = api_get_config(sn)
+    if config is None:
+        print(f"Unable to retrieve shop floor config for '{sn}'")
+        exit(1)
+
+    return (config["ETH0"], config["BMCMAC"])
+
+
+if __name__ == "__main__":
+    parser = ArgumentParser(prog="find_ip")
+    parser.add_argument("mac", nargs="?", default=None)
+    parser.add_argument("-u", "--uut", help="Server SN to lookup mac addresses")
+    args = parser.parse_args()
+
+    if args.uut:
+        uut_sn = args.uut
+        uut_eth0, uut_bmc = get_mac_addresses_from_config(uut_sn)
+
+        if uut_eth0 and uut_bmc:
+            uut_eth0 = normalize_mac(uut_eth0)
+            uut_bmc = normalize_mac(uut_bmc)
+            eth0_ip = get_leased_ip(uut_eth0)
+            uut_ip = get_leased_ip(uut_bmc)
+
+        if eth0_ip:
+            print(f"{'ETH0':<5} | {uut_eth0} | {eth0_ip}")
+        else:
+            print(f"{'ETH0':<5} | {uut_eth0} | None")
+
+        if uut_ip:
+            print(f"{'BMC':<5} | {uut_bmc} | {uut_ip}")
+        else:
+            print(f"{'BMC':<5} | {uut_bmc} | None")
+    else:
+        if args.mac is None:
+            parser.print_usage()
+            sys.exit(1)
+
+        mac_address_to_search = args.mac
+        mac_address = normalize_mac(mac_address_to_search)
+        leased_ip = get_leased_ip(mac_address)
+
+        if leased_ip:
+            print(leased_ip)
+        else:
+            print("None")

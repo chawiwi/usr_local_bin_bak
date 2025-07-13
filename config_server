@@ -1,0 +1,150 @@
+#!/usr/bin/env python3
+
+from zeep import Client
+import json
+import logging
+import sys
+import os
+
+api_url = "http://192.168.66.20/AMA_L11/AMAService.svc?singleWsdl"
+stations = [
+    "PRETEST",
+    "RUNIN",
+    "MDAASGENCONFIG",
+    "MDAASSHC",
+    "MDAASLINUX",
+    "MDAASWINDOWS",
+    "NETTEST",
+    "FST",
+]
+
+
+class RequestException(Exception):
+    pass
+
+
+def print_usage():
+    logging.error("Usage: config_server (project) (station)")
+
+
+def execute_request(api_type, sn, api_station):
+    client = Client(api_url)
+    response = client.service.SendRequest(api_type, sn, api_station)
+    data = json.loads(str(response).replace("'", '"').replace("None", "null"))
+    if data["Msg"] != "OK":
+        raise RequestException(f"Failed for '{sn}'")
+    return data
+
+
+def write_config(project, sn, station):
+    try:
+        data = execute_request("QUERY", sn, "CONFIG")
+    except RequestException as e:
+        raise RequestException(f"Config not found for '{sn}'")
+
+    # project was not specified in command line, try auto-detect from config
+    if project is None:
+        for line in data["Configs"]["Config"]:
+            if line["Parameter"] == "MODEL":
+                project = line["Value"]
+                break
+
+        if project is None:
+            logging.error(
+                f"Unable to automatically detect project for '{sn}'. Please try supplying the project."
+            )
+            print_usage()
+            exit(1)
+        print(f"Automatically detected project: {project}")
+
+    # Write the file
+    config_file = f"/WIN/{project}/response/config/{sn}.txt"
+    if os.path.exists(config_file):
+        os.remove(config_file)
+    with open(config_file, "a") as file:
+        for line in data["Configs"]["Config"]:
+            if line["Parameter"] == "STATION":
+                file.write("{0}={1}\r\n".format(line["Parameter"], station))
+            else:
+                value = line["Value"]
+                if line["Value"] == None:
+                    value = ""
+                file.write("{0}={1}\r\n".format(line["Parameter"], value))
+        file.write("[END]\r\n")
+
+
+def get_servers(rack_sn):
+    sn_list = []
+    data = execute_request("QUERY", rack_sn, "RLT")
+    for i in data["Assets"]["Asset"]:
+        type = i["Type"]
+        if type != "SERVERS":
+            continue
+        unit_sn = i["Serial"]
+        if unit_sn[0] == "P":
+            if unit_sn in sn_list:
+                continue
+            sn_list.append(unit_sn)
+    return sn_list
+
+
+if __name__ == "__main__":
+    rack_sns = []
+
+    # Check if arguments are passed
+    if len(sys.argv) == 1:
+        # Since no arguments are passed, assume auto-detect with PRETEST station
+        sys.argv.append("PRETEST")
+    elif len(sys.argv) == 2:
+        # Check if the 2nd argument is a project or station
+        station = sys.argv[1].strip().upper()
+        if station not in stations:
+            station = "PRETEST"
+    else:
+        station = sys.argv[2].strip().upper()
+
+    project = sys.argv[1].strip().upper()
+    if not os.path.exists(f"/WIN/{project}"):
+        # Check if the "project" is actually a station
+        if project in stations:
+            station = project
+            project = None
+        else:
+            logging.error(f"Error: Invalid project: '{project}")
+            print_usage()
+            exit(1)
+
+    if station not in stations:
+        logging.error(f"Error: Invalid station: '{station}'")
+        print_usage()
+        exit(1)
+
+    print(f"Using station '{station}' and project '{project or 'Auto'}'")
+
+    line = input(
+        "Paste Arrays of Rack/UUT Serial numbers (press enter twice if you copy from Test Monitor):\n"
+    ).strip()
+    while len(str(line)) != 0:
+        rack_sns.append(line.strip())
+        line = input()
+
+    if len(rack_sns) == 0:
+        logging.error("No serial number inputed")
+        exit(1)
+
+    for rack in rack_sns:
+        if rack[0] == "R":
+            try:
+                servers = get_servers(rack)
+            except RequestException as e:
+                logging.error(str(e))
+            for sn in servers:
+                try:
+                    write_config(project, sn, station)
+                except RequestException as e:
+                    logging.error(str(e))
+        elif rack[0] == "P":
+            try:
+                write_config(project, rack, station)
+            except RequestException as e:
+                logging.error(str(e))

@@ -1,0 +1,625 @@
+#!/usr/bin/env python3
+#from threading import Thread
+from collections import namedtuple
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import os
+import subprocess
+import threading
+import time
+from colorama import Fore, Style
+from zeep import Client
+import json
+import sys
+from colorama import Fore
+import time
+import re
+LOG_PATH="/RACKLOG/quanta/"
+bmc_port="bmc"
+eth0_port="eth0"
+UUTInfo = namedtuple('UUTInfo', ['model','serial_number', 'bmc_mac', 'eth0_mac', 'mbsn', 'eth9_mac', 'test_loc'])
+red_fish = False
+def getresult(arg1):
+    p = subprocess.Popen(arg1, stdout=subprocess.PIPE, shell=True, text=True)
+    (text, err) = p.communicate()
+    return text
+def ac_uut(ip_list):
+    for uut in ip_list:
+        cmd_uut_off = f"ipmitool -H {uut} -U admin -P admin power off"
+        cmd_uut_on = f"ipmitool -H {uut} -U admin -P admin power on"
+        mesg = getresult(cmd_uut_off)
+        if "Down/Off" in mesg:
+            print("-------------------RESULT------------------------------")
+            print(Fore.YELLOW + f"{uut} is turning off" + Style.RESET_ALL)
+            print(Fore.MAGENTA + f"Sleeping time is for 15 seconds" + Style.RESET_ALL)
+            time.sleep(15)
+            mesg=getresult(cmd_uut_on)
+            if "Up/On" in mesg:
+                print(Fore.GREEN + f"{uut} is turning back on" + Style.RESET_ALL)
+            else:
+                print(f"Error mesg:{mesg}")
+        else:
+            display_error(mesg)
+def dc_uut(ip_list):
+    for uut in ip_list:
+        cmd_dc = f"ipmitool -H {uut} -U admin -P admin power cycle"
+        output = getresult(cmd_dc)
+        if "Cycle" in output:
+            print("-------------------RESULT------------------------------")
+            print(Fore.YELLOW + f"{uut} is reboot" + Style.RESET_ALL)
+        else:
+             display_error(output)
+def pxe_boot(ip_list):
+    for uut in ip_list:
+        cmd_pxe_boot = f"ipmitool -H {uut} -U admin -P admin chassis bootdev pxe options=efiboot"
+        cmd_dc = f"ipmitool -H {uut} -U admin -P admin power cycle"
+        output = getresult(cmd_pxe_boot)
+        if "pxe" in output:
+            print("-------------------RESULT------------------------------")
+            print(Fore.YELLOW + f"{uut} set to pxe boots" + Style.RESET_ALL)
+            mesg = getresult(cmd_dc)
+            if "Cycle" in mesg:
+                print(Fore.GREEN + f"{uut} is rebooted " + Style.RESET_ALL)
+            else:
+                display_error(mesg)
+        else:
+            display_error(output)
+def uut_ipmitool(ip_list,key):
+    output="Error - No Output"
+    for uut in ip_list:
+        if key == "boot_flag":
+            cmd_pxe_boot_flag = f"ipmitool -H {uut} -U admin -P admin chassis bootparam get 5"
+            output = getresult(cmd_pxe_boot_flag)
+        elif key == "sel_list":
+            cmd_sel_list = f"ipmitool -H {uut} -U admin -P admin sel elist"
+            output = getresult(cmd_sel_list)
+        elif key == "bios_code":
+            cmd_post_code = f"ipmitool -H {uut} -U admin -P admin raw 0x32 0x73 0x0"
+            output = getresult(cmd_post_code)
+        elif key == "chassis_status":
+            cmd_chassis_status = f"ipmitool -H {uut} -U admin -P admin power status"
+            output = getresult(cmd_chassis_status)
+        elif key == "sol_deactive":
+            cmd_sol_deactive = f"ipmitool -H {uut} -U admin -P admin -I lanplus sol deactivate"
+            output = getresult(cmd_sol_deactive)
+        elif key == "chassis_on":
+            cmd_chassis_on = f"ipmitool -H {uut} -U admin -P admin power on"
+            output = getresult(cmd_chassis_on)
+        if output != 0:
+            print("\nIP " + uut + "\n" + output)
+        else:
+            print(output)
+def ipmitool_input(ip_arr,cmd_input):
+    error = "Failed to send an command to uut"
+    for i in ip_arr:
+        cmd_ipmitool=f"ipmitool -H {i} -U admin -P admin {cmd_input}"
+        print(f"The command is '{cmd_ipmitool}' ")
+        output = getresult(cmd_ipmitool)
+        if output != 0:
+            print(output)
+        else:
+            print(error)
+def cp_reconfigAPP(list_ip):
+    for ip in list_ip:
+        cmd_cp_reconfigAPP= f"sshpass -p 'admin' ssh -p 8295 -o 'StrictHostKeyChecking no' admin@{ip} \"echo 'overlake' | sudo -S /usr/bin/fpgadiagnostics -reconfigApp\""
+        output = getresult(cmd_cp_reconfigAPP)
+        if "8295" in output:
+            print("-------------------RESULT------------------------------")
+            print(Fore.YELLOW + f"{ip} CP card has reconfigAPP " + Style.RESET_ALL)
+            print(Fore.GREEN + f"{ip} rebooting " + Style.RESET_ALL)
+        else:
+            display_error(output)
+def access_uut(ip_list,port):
+    if len(ip_list) > 1:
+        error = "Can not access multiple servers"
+        display_error(error)
+        return 1
+    elif port == "sol_active":
+        cmd_access = f"ipmitool -H {ip_list[0]} -U admin -P admin -I lanplus sol activate"
+        os.system(cmd_access)
+    elif port == "eth0":
+        if "NV" in type_uut:
+            cmd_access = f"sshpass -p 'admin' ssh -o 'StrictHostKeyChecking no' admin@{ip_list[0]}"
+        else:
+            cmd_access = f"sshpass -p 'root' ssh -o 'StrictHostKeyChecking no' root@{ip_list[0]}"
+        os.system(cmd_access)
+    elif port == "cp_card":
+        cmd_access = f"sshpass -p 'admin' ssh -p 8295 -o 'StrictHostKeyChecking no' admin@{ip_list[0]}"
+        os.system(cmd_access)
+    elif port == "bmc":
+        cmd_access = f"sshpass -p 'admin' ssh -o 'StrictHostKeyChecking no' admin@{ip_list[0]}"
+        os.system(cmd_access)
+def asking_mdass_input(path):
+    input_file="No Input"
+    print(Fore.MAGENTA + "What is the options that you want -> 1. Create Mdaas Boot 2.Remove Mdaas Boot ")
+    input_choice=input(Fore.MAGENTA + "Enter the action: " + Style.RESET_ALL)
+    while input_choice not in ["1","2"]:
+        input_choice=input(Fore.MAGENTA + "Re-Enter the action again: " + Style.RESET_ALL)
+    if input_choice == "1":
+        input_file=input(Fore.MAGENTA + "Enter the name of mdaas file: " + Style.RESET_ALL)
+        input_file.strip()
+        file_path=f"{root_path}{input_file}"
+        while len(input_file) == 0 or not os.path.exists(file_path):
+            print("The file name can not empty or no file found")
+            input_file=input(Fore.MAGENTA + "Re-Enter the name of mdaas file:  " + Style.RESET_ALL)
+            input_file=input_file.strip()
+    return input_choice,input_file
+def change_custom_mdaas(mac_list,file_name,root,models,sn_list,key_choice):
+    model=models[0].split('-')[0]
+    if model == "T6J":
+        model="L15"
+    flag_path=f"/WIN/{model}/MDAAS/"
+    path=f"{root}{file_name}"
+    for index, m in enumerate(mac_list):
+        prefix_custom_file = format_mac_address(m.eth0_mac, "custom_ipxe_format")
+        prefix_flag_mac = format_mac_address(m.eth0_mac, "normal_format")
+        dest = f"{root}{prefix_custom_file}_menu.ipxe"
+        if key_choice == "1":
+            cmd_cp = f"cp {path} {dest}"
+            print(f"The customize mdaas boot is created: {prefix_custom_file}_ipxe.menu")
+            cmd_flag = f"echo {prefix_flag_mac} > {flag_path}{sn_list[index].upper()}.txt "
+            print(f"The mdaas flag is created: {flag_path}{sn_list[index].upper()}.txt")
+            output_cp = getresult(cmd_cp)
+            print(output_cp)
+            output_cp_flag = getresult(cmd_flag)
+            print(output_cp_flag)
+        elif key_choice == "2":
+            cmd_rm = f"rm -rf {dest}"
+            cmd_rm_flag = f"rm -rf {flag_path}{sn_list[index].upper()}.txt "
+            print(f"The customize mdaas boot is removed: {prefix_custom_file}_menu.ipxe")
+            output_rm = getresult(cmd_rm)
+            print(output_rm)
+            print(f"The mdaas flag is removed: {flag_path}{sn_list[index].upper()}.txt")
+            output_rm_flag = getresult(cmd_rm_flag)
+            print(output_rm_flag)
+def format_mac_address(mac,key):
+    if key == "normal_format":
+        return ':'.join(mac[i:i + 2].lower() for i in range(0, len(mac), 2))
+    elif key == "custom_ipxe_format":
+        return '-'.join(mac[i:i + 2].lower() for i in range(0, len(mac), 2))
+def get_dhcp_list():
+    dhcp_lease_list = "dhcp-lease-list | grep -A9999 '=' | awk '{print $1, $2}'"
+    valid_list = getresult(dhcp_lease_list)
+    valid_dict = {}
+    for line in valid_list.strip().split('\n'):
+        fields = line.split()
+        if len(fields) >= 2:
+            mac = fields[0]
+            ip = fields[1]
+            valid_dict[mac] = ip
+    return valid_dict
+def find_uut_ip(pn_list,addr_port):
+    ip = []
+    cp_ip = []
+    models = []
+    location = []
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        futures_mac_list = executor.submit(api_calling_threaded,pn_list)
+        futures_dhcp_map = executor.submit(get_dhcp_list)
+        #waiting for the result for threads
+        mac_list = futures_mac_list.result()
+        dhcp_map = futures_dhcp_map.result()
+
+    uut_ip_cp,uut_ip_bmc,uut_ip_eth0 = '','',''
+    for uut in mac_list:
+        bmcmac_format = format_mac_address(uut.bmc_mac,"normal_format")
+        ethmac_format = format_mac_address(uut.eth0_mac,"normal_format")
+        models.append(uut.model)
+        location.append(uut.test_loc)
+        if uut.eth9_mac != None:
+            eth9_mac_format = format_mac_address(uut.eth9_mac,"normal_format")
+            if eth9_mac_format in dhcp_map:
+                uut_ip_cp = dhcp_map[eth9_mac_format]
+            if uut_ip_cp== '':
+                cp_ip.append('None')
+            else:
+                cp_ip.append(uut_ip_cp.strip())
+        else:
+            cp_ip.append('None')
+        if addr_port in ("bmc", "both"):
+            if bmcmac_format in dhcp_map:
+                uut_ip_bmc = dhcp_map[bmcmac_format]
+            if uut_ip_bmc == '':
+                ip.append('None')
+            else:
+                ip.append(uut_ip_bmc.strip())
+        if addr_port in ("eth0", "both"):
+            if ethmac_format in dhcp_map:
+                uut_ip_eth0 = dhcp_map[ethmac_format]
+            if uut_ip_eth0 == '':
+                ip.append('None')
+            else:
+                ip.append(uut_ip_eth0.strip())
+    return cp_ip,ip,mac_list,models,location
+def ping_ip(uut_ip):
+    cmd = f"ping -c 1 {uut_ip} > /dev/null"
+    if uut_ip == 'None':
+        return "No IP"
+    elif os.system(cmd) == 0:
+        return "Success"
+    else: # ping fail
+        return "Fail"
+
+def process_raw_data(raw_data1, raw_data2, raw_data3):
+    if not raw_data1 or not raw_data2 or not raw_data3:
+        print('Error: Missing required raw data.')
+        return None, None, None
+
+    cmd_process0 = f"echo -e \"{raw_data1}\" | awk '{{ print $3$4$5$6 $7$8$9 }}' | xxd -ps -r"
+    cmd_process1 = f"echo -e \"{raw_data2}\" | awk '{{ print $3$4$5$6$7$8$9$10$11 }}' | xxd -ps -r"
+    cmd_process2 = f"echo -e \"{raw_data3}\" | awk '{{ print $3$4$5$6$7$8$9$10$11 }}' | xxd -ps -r"
+
+    try:
+        result0, result1, result2 = getresult(cmd_process0), getresult(cmd_process1), getresult(cmd_process2)
+        return result0,result1,result2
+    except Exception as e:
+        print(f"Error: {e}")
+        return None, None, None
+def get_psu_fw(bmc_ips, models_arr):
+    for model in models_arr:
+        if model[:4] != "T6UB" and model[:4] != "T6UA":
+            print(f"\n Cannot check PSU for model {model}. PSU can only be checked for T6UA,T6UB models. Still working on other models..\n")
+            return
+    for ip in bmc_ips:
+        cmd_fw0 = f"ipmitool -H {ip} -U admin -P admin raw 0x06 0x52 0x3 0xB0 0x0A 0xEF 0x01 0x00"
+        cmd_fw1 = f"ipmitool -H {ip} -U admin -P admin raw 0x06 0x52 0x3 0xB0 0x0A 0xEF 0x01 0x0A"
+        cmd_fw2 = f"ipmitool -H {ip} -U admin -P admin raw 0x06 0x52 0x3 0xB0 0x0A 0xEF 0x01 0x0B"
+        cmd_list=[cmd_fw0, cmd_fw1, cmd_fw2]
+        try:
+            # Trying to ping eth_ip
+            ping_result = ping_ip(ip)
+            if ping_result != "Success":
+                print(f'BMC IP:{ip} not pingable')
+                return
+            result_list = [getresult(cmd) for cmd in cmd_list]
+            #checking if any result is empty
+            error_checking = [i for i, result in enumerate(result_list) if result == '']
+            if error_checking:
+                empty_results = [f"result_fw{i}" for i in error_checking]
+                print(f"The following PSU firmware results are empty: {', '.join(empty_results)}")
+            data_fw0, data_fw1, data_fw2 = process_raw_data(*result_list)
+            if data_fw0 and data_fw1 and data_fw2:
+                    print(f"\npsu_firmware_0: {data_fw0}")
+                    print(f"psu_firmware_1: {data_fw1}")
+                    print(f"psu_firmware_2: {data_fw2}")
+        #timeout error
+        except subprocess.TimeoutExpired:
+            print(f"\n\nError: The command timed out while trying to connect to {new_eth_ip}.")
+        except subprocess.CalledProcessError as e:
+            print(f"\n\nError running the command: {e.stderr}")
+        except Exception as e:
+            print(f"\n\nAn unexpected error occurred: {str(e)}")
+def find_rm_ip(uuts_loc):
+    uut_ids, rm_mac, rm_ips = [] , [], []
+    rm_mapping_file='/SFC/T6T/rm/rm_mapping.ini'
+    if not os.path.isfile(rm_mapping_file):
+        print(f"No rm_mapping file in {rm_mapping_file}")
+    print_out_mapping = getresult(f"cat {rm_mapping_file}")
+    mapping_clean = print_out_mapping.replace("'", "\"")
+    rm_mapping_mac = json.loads(mapping_clean)
+    print(f"List of Location {uuts_loc}")
+    for uut_loc in uuts_loc:
+        uut_rm_mac = uut_loc[:5]
+        uut_last_2 = uut_loc[4:]
+        if rm_mapping_mac[uut_rm_mac]:
+            print(f"RM Mac is {rm_mapping_mac[uut_rm_mac]}")
+            rm_mac = rm_mapping_mac[uut_rm_mac]
+            dhcp_lease_list = get_dhcp_list()
+            rm_mac_format = format_mac_address(rm_mac,"normal_format")
+            rm_ip = dhcp_lease_list[rm_mac_format]
+            rm_ips.append(rm_ip)
+        if uut_last_2 < "10":
+           uut_ids.append(uut_last_2[-1:])
+        else:
+           uut_ids.append(uut_last_2)
+    if len(rm_mac) < 1:
+        print("No RM Mac is matching with")
+    return rm_ips,uut_ids
+def query_uut_info(url, sn):
+    API_Type = "CONFIG"
+    API_Station = "QUERY"
+    client = Client(url)
+    response = client.service.SendRequest(API_Station,sn,API_Type)
+    response_text = str(response).replace("'", "\"").replace("None", "null")
+    response_dict = json.loads(response_text)
+    model,bmc_mac, eth0_mac, mbsn, eth9_mac, test_loc="Unknown","Unknown","Unknown","Unknown","Unknown","Unknown"
+    global red_fish,type_uut
+    type_uut = "None GB200"
+    bios_ver = "unknown"
+    for config in response_dict['Configs']['Config']:
+        if config['Parameter'] == 'MODEL':
+            model = config['Value']
+            continue
+        elif config['Parameter'] == 'MBSN':
+            mbsn = config['Value']
+            continue
+        elif config['Parameter'] == 'BMCMAC':
+            bmc_mac = config['Value']
+            continue
+        elif config['Parameter'] == 'BIOS':
+            bios_ver = config['Value'].split(',')[0].strip()
+            continue
+        if 'T6K' in model:
+            if config['Parameter'] == 'ETH1':
+                eth9_mac = config['Value'].split(',')[0]
+        elif 'T6H' in model:
+            if config['Parameter'] == 'ETH2':
+                eth9_mac = config['Value'].split(',')[0]
+        elif 'T6G' in model:
+            if config['Parameter'] == 'ETH3':
+                eth9_mac = config['Value'].split(',')[0]
+        elif 'T6T' in model:
+            if '0ACTV' in bios_ver:
+                type_uut = "NV Switch"
+                if config['Parameter'] == 'ETH0':
+                    eth0_mac = config['Value'].split(',')[0]
+                    continue
+                elif config['Parameter'] == 'ETH1':
+                    eth9_mac = config['Value'].split(',')[0]
+                    continue
+            else:
+                red_fish = True
+                type_uut = "Compute Tray"
+                if config['Parameter'] == 'ETH1':
+                    eth0_mac =  config['Value'].split(',')[0]
+                    continue
+                elif config['Parameter'] == 'ETH0':
+                    eth9_mac = config['Value'].split(',')[0]
+                    continue
+        else:
+            if config['Parameter'] == 'ETH0':
+                eth0_mac = config['Value'].split(',')[0]
+                continue
+            elif config['Parameter'] == 'ETH9':
+                eth9_mac = config['Value'].split(',')[0]
+                continue
+        if config['Parameter'] == 'TESTLOC':
+                test_loc = config['Value']
+                continue
+    return UUTInfo(model=model,serial_number=sn, bmc_mac=bmc_mac, eth0_mac=eth0_mac, mbsn=mbsn, eth9_mac=eth9_mac, test_loc=test_loc)
+
+def api_calling_threaded(sns):
+    stop_event = threading.Event()
+    t = threading.Thread(target=waiting_animation, args=(stop_event,))
+    t.start()
+    api_url = 'http://192.168.66.20/AMA_L10/AMAService.svc?singleWsdl'
+    uut_info_list = []
+    for sn in sns:
+        uut_info_list.append(query_uut_info(api_url, sn))
+    stop_event.set()
+    t.join()
+    return uut_info_list
+
+def waiting_animation(stop_event):
+    while not stop_event.is_set():
+        for char in "|/-\\":
+            sys.stdout.write(f'\rCall API Processing {char}')
+            sys.stdout.flush()
+            time.sleep(0.1)
+    sys.stdout.write('\n')
+    sys.stdout.write('\r' + ' ' * 25 + '\r')
+
+def display_error(msg_error):
+    print( "------------------Warning------------------------------")
+    print(Fore.RED + f"Error occurs with this message:             ")
+    print(f"{msg_error}                               " + Style.RESET_ALL)
+    print( "-------------------------------------------------------")
+def display_menu():
+    actions = [
+        "Showing BMC/ETH MAC/MBSN and IP",
+        "Showing BMC Sel List",
+        "Accessing Server by Sol",
+        "Accessing Server by ETH Port",
+        "Accessing Server by BMC Port",
+        "Accessing CP Card",
+        "Showing Testing Log Location",
+        "Showing Boot Flag",
+        "Set PXE Boot",
+        "Reboot server (DC Cycle)",
+        "Showing Bios Code",
+        "Showing Chassis Status",
+        "Deactive SOL",
+        "Re-enter another server",
+        "Turning Server On",
+        "Running Ipmitool Command",
+        "MDAAS generate/remove the boots/status flags",
+        "PSU Model Revision/Firmware",
+        "Check RSCM/System Information By Redfish API (GB200 Only)"
+    ]
+    #Set the midpoint at 9 since there's only 17 actions, if mid//2 = 8
+    mid = 10
+    left_column = actions[:mid]  # First 9 actions
+    right_column = actions[mid:]  # Actions 10-17
+    max_index_left = len(str(mid))
+    max_index_right = len(str(len(actions)))
+    for i in range(mid):
+       left_item = f"{i+1:>{max_index_left}}. {left_column[i]:<45}"
+       right_item = f"{i+1+mid:>{max_index_right}}. {right_column[i]}" if i < len(right_column) else ""
+       print(f"{left_item} {right_item}")
+def input_sn():
+    pn_list = []
+    bmc_ip_list  = []
+    eth_ip_list = []
+
+    if len(sys.argv) > 1:
+        sn = sys.argv[1]
+    else:
+        sn = input(Fore.MAGENTA + "Please enter serial number of the servers:\n" + Style.RESET_ALL).strip().lower()
+    while len(sn) != 0:
+        if 'p' in sn or 'P' in sn:
+            sn_cleaned= re.sub(r'\x1B\[200~|\x1B\[201~', '', sn)
+            pn_list.append(sn_cleaned)
+            if len(sys.argv) > 1:
+                break
+            sn = input().strip().lower()
+        else:
+            print("The information is not a serial number of servers")
+            sn = input().strip().lower()
+
+    choice = input(Fore.MAGENTA +"Enter your choice (99 for menu options): "+ Style.RESET_ALL)
+    time.sleep(1)
+    cp_ip_list,get_ip,macs_list,model_list,test_loc = find_uut_ip(pn_list,"both")
+    index = 0
+    for each in get_ip:
+        if index%2 == 0:
+            bmc_ip_list.append(each)
+        else:
+            eth_ip_list.append(each)
+        index += 1
+    return choice,bmc_ip_list,eth_ip_list,cp_ip_list,macs_list,pn_list,model_list,test_loc
+def main():
+    options,bmc_ip,eth_ip,cp_ip,macs,pn,models_arr,test_loc = input_sn()
+    run_option = False
+    while options not in ["quit","q"]:
+        while options not in ["99","1","2","3","4","5","6","7","8","9","10","11","12","13","14","15","16","17","18","19","quit","q"]:
+                options=input(Fore.MAGENTA + "\nPlease enter the right number (type 99 for menu options): "+ Style.RESET_ALL)
+        if options == "quit" or options == "q":
+            sys.exit()
+        elif options > '18' and 'T6T' not in models_arr[0] or options > '18' and 'NV' in type_uut:
+            if 'NV' in type_uut:
+                print('This option only work for compute tray GB200. This uut is NV Switch')
+            else:    
+                print('This option only for GB200 with RM Redfish Version')
+            sys.exit()
+        run_option = False
+        if options == '99':
+            display_menu()
+            run_option= True
+        elif options == '1':
+            ping_results = {"bmc": [ping_ip(ip) for ip in bmc_ip],
+                            "eth": [ping_ip(ip) for ip in eth_ip],
+                            "cp": [ping_ip(ip) for ip in cp_ip]  }
+            print(f'\nRSCM Redfish: {red_fish}')
+            print(f'Server type: {type_uut}')
+            for each in range(len(bmc_ip)):
+                print(f"UUT {pn[each]}  | MB: {macs[each].mbsn}   | Ping   ")
+                print(f"BMC MAC: {macs[each].bmc_mac} | BMC IP: {bmc_ip[each]}           | {ping_results['bmc'][each]} ")
+                print(f"ETH MAC: {macs[each].eth0_mac} | ETH IP: {eth_ip[each]}         | {ping_results['eth'][each]} ")
+                print(f"FPGA MAC:{macs[each].eth9_mac} | CP/GP IP: {cp_ip[each]}       | {ping_results['cp'][each]}")
+            run_option = True
+        elif options == '2':
+            uut_ipmitool(bmc_ip,'sel_list')
+            run_option = True
+        elif options == '3':
+            access_uut(bmc_ip,'sol_active')
+            run_option = True
+        elif options == '4':
+            access_uut(eth_ip,eth0_port)
+            run_option = True
+        elif options == '5':
+            access_uut(bmc_ip,bmc_port)
+            run_option = True
+        elif options == '6':
+            if "T6T" in models_arr[0]:
+                print("This feature is not available for GB200. Please access GP card by RM.")
+            else:
+                access_uut(bmc_ip,'cp_card')
+            run_option = True
+        elif options == '7':
+            from find_log import log_search
+            log_search.find_sn(pn)
+            run_option = True
+        elif options == '8':
+            uut_ipmitool(bmc_ip,'boot_flag')
+            run_option = True
+        elif options == '9':
+            cp_reconfigAPP(bmc_ip)
+            run_option = True
+        elif options == '10':
+            dc_uut(bmc_ip)
+            run_option = True
+        elif options == '11':
+            uut_ipmitool(bmc_ip,'bios_code')
+            run_option = True
+        elif options == '12':
+            uut_ipmitool(bmc_ip,'chassis_status')
+            run_option = True
+        elif options == '13':
+            uut_ipmitool(bmc_ip,'sol_deactive')
+            run_option = True
+        elif options == '14':
+            if len(sys.argv) > 1:
+                sys.argv.pop(1)
+            options, bmc_ip, eth_ip, cp_ip, macs, pn , models_arr,test_loc = input_sn()
+        elif options == '15':
+            uut_ipmitool(bmc_ip,'chassis_on')
+        elif options == '16':
+            input_cmd=input(Fore.MAGENTA + "Enter the command for ipmitool(Ex: fru print): " + Style.RESET_ALL)
+            while len(input_cmd) == 0:
+                print("The command can not empty")
+                input_cmd=input(Fore.MAGENTA + "Enter the command for ipmitool(Ex: fru print): " + Style.RESET_ALL)
+            while input_cmd not in ["quit","q"]:
+                input_cmd=input_cmd.strip().lower()
+                ipmitool_input(bmc_ip,input_cmd)
+                input_cmd=input(Fore.MAGENTA + "Re-enter the command for ipmitool (or quit/q): " + Style.RESET_ALL)
+            if input_cmd == "quit" or input_cmd == "q":
+                run_option = True
+        elif options == '17':
+            root_path="/home/container/ipxe/"
+            choice,file_name=asking_mdass_input(root_path)
+            change_custom_mdaas(macs,file_name,root_path,models_arr,pn,choice)
+            run_option = True
+        elif options == '18':
+            #print(bmc_ip)
+            get_psu_fw(bmc_ip, models_arr)
+            run_option = True
+        elif options == '19':
+            from rm_redfish import RM_REDFISH as redfish_call
+            request_type = { "1" : "POST", "2" : "GET", "3" : "PATCH", "4" : "DELETE" }
+            rm_ip, uut_id = find_rm_ip(test_loc)
+            objs = []
+            print(rm_ip,uut_id)
+            user_pick = input(Fore.GREEN +"Enter your pick for RM (77 for rm menu options): "+ Style.RESET_ALL)
+            while user_pick not in ["quit","q"]:
+                while "0" > user_pick > "8"  and user_pick not in ["77","quit","q"]:
+                    user_pick=input(Fore.GREEN + "\nPlease enter the right number (type 77 for rm menu options): "+ Style.RESET_ALL)
+                if user_pick == "quit" or options == "q":
+                    sys.exit()
+                for j in range(len(uut_id)):
+                    obj = redfish_call(uut_id[j],rm_ip[j])
+                    objs.append(obj)
+                if user_pick == '77':
+                    redfish_call.rm_menu()
+                elif user_pick == '1':
+                    for obj in objs:
+                        obj.rm_query("manager_info",request_type['2'])
+                elif user_pick == '2':
+                    for obj in objs:
+                        obj.rm_query("manager_tftp",request_type['2'])
+                elif user_pick == '3':
+                    for obj in objs:
+                        obj.rm_query("manager_inventory",request_type['2'])
+                elif user_pick == '4':
+                    objs.rm_query("manager_cpld",request_type['2'])
+                elif user_pick == '5':
+                    rm_cmd=input(Fore.GREEN + "Enter the command for RM(Ex: show system fru): " + Style.RESET_ALL)
+                    while len(rm_cmd) == 0:
+                        print("The command can not empty")
+                        rm_cmd=input(Fore.GREEN + "Enter the command for RM(Ex: show system fru): " + Style.RESET_ALL)
+                    while rm_cmd not in ["quit","q"]:
+                        rm_cmd=rm_cmd.strip().lower()
+                        for obj in objs:
+                            obj.rm_cli_cmd(rm_cmd)
+                        rm_cmd=input(Fore.GREEN + "Re-enter the command for RM (or quit/q): " + Style.RESET_ALL)
+                    if rm_cmd == "quit" or rm_cmd == "q":
+                        run_option = True
+                elif user_pick == '6':
+                    for obj in objs:
+                        obj.rm_sys_query("system_info")
+                elif user_pick == '7':
+                    for obj in objs:
+                        obj.rm_sys_query("system_bios_code")
+                elif user_pick == '8':
+                    for obj in objs:
+                        obj.rm_sys_query("system_cerberus")
+                elif user_pick == '9':
+                    rm_cmd='show system fru'
+                    for obj in objs:
+                        obj.rm_cli_cmd(rm_cmd)
+                print(Fore.GREEN +"\nDo you still need to perform any actions else?(q/quit or 77 for rm menu options): ")
+                user_pick = input(Fore.GREEN +"Enter your pick for RM: " + Style.RESET_ALL).strip().lower()
+            sys.exit()
+        if run_option:
+            print(Fore.MAGENTA +"\nDo you still need to perform any actions else?(q/quit or 99 menu options): ")
+            options = input(Fore.MAGENTA +"Enter your choice: " + Style.RESET_ALL).strip().lower()
+if __name__ == '__main__':
+    main()

@@ -1,0 +1,154 @@
+#!/bin/bash
+alias cp='cp'
+WINSVR="192.168.8.253"
+WINUSR="TMUserMSF@fab.com"
+WINPW="T3stMU55rmsf"
+UUTtoLX="/RACKLOG"       ##for log from uut
+BAKRACK="/RACKBAK"       ##After uut test finish move to
+WIN="/WIN"               ##log,res,req for UUT 
+SFC="/SFC"               ##mount to WIN server for log,res,req
+BCASTIP="10.0.3.255"
+ModelLable=(T6UB T6UC T6G T6UA_2U_MILAN T6H L15)
+ModelNUM="6"
+LOCKFILE="/var/run/swlog.pid"
+is_pid_running() {
+    local pid=$1
+    if [ -z "$pid" ]; then
+        return 1
+    fi
+    if ps -p "$pid" > /dev/null; then
+        return 0
+    else
+        return 1
+    fi
+}
+if [ -e "$LOCKFILE" ]; then
+    PID=$(cat "$LOCKFILE")
+    if is_pid_running "$PID"; then
+        echo "Another instance of the script is already running (PID: $PID). Exiting."
+        exit 1
+    else
+        rm -f "$LOCKFILE"
+    fi
+fi
+echo $$ > "$LOCKFILE"
+cleanup() {
+    rm -f "$LOCKFILE"
+}
+trap cleanup EXIT
+
+
+mountting()
+{
+mount -tcifs "//$WINSVR/monitor" "$SFC" -ouser="$WINUSR",password="$WINPW",vers=2.0
+if [ $? -ne 0 ];then
+  echo "Can not mount to //$WINSVR/monitor in `date`"|tee -a "$UUTtoLX/Connection.LOG"
+  return 1
+fi
+}
+
+s_mv()
+{
+	for file in "$1"/*.txt; do
+		if [ ! -s $file ]; then
+			rm $file
+			continue
+		fi
+		echo $(date) >> /var/log/sf_request.log
+		for run in $(seq 3); do
+				if cp -v "$file" "$2" >> /var/log/sf_request.log 2>&1; then
+						#echo "copied $file to $2"
+						rm "$file"
+						break
+				else
+						echo "Retry: Failed copy $file"
+						sleep 1
+				fi
+		done
+	done
+}
+
+ls $SFC/T6UB > /dev/null
+if [ $? -ne 0 ]; then
+echo "$SFC connection broken, Remountting...`date`"|tee -a "$UUTtoLX/Connection.LOG"
+mountting
+else
+# cronjob only runs per minutes, we need to 3 times for 15 second interval
+count=3
+for run in $(seq $count); do
+	for (( i=0; i<$ModelNUM; i++ ));
+	do
+		#echo $(date) >> /var/log/sf_request.log
+#		s_mv $SFC/NetApp/Response $WIN/NetApp/Response/ >> /var/log/sf_request.log
+		#mv -f $SFC/NetApp/Response/*.txt $WIN/NetApp/Response/ >/dev/null 2>&1
+#		s_mv $WIN/NetApp/Request $SFC/NetApp/Request/ >> /var/log/sf_request.log
+		#mv -f $WIN/NetApp/Request/*.txt $SFC/NetApp/Request/ >/dev/null 2>&1
+		# cp -f $WIN/NetApp/Status/*.txt $SFC/NetApp/Request/mac/ >/dev/null 2>&1
+#		find "$WIN/NetApp/Status/" -type f -name "*.txt" -size 0 -exec rm -v {} \;
+#		mv -f $WIN/NetApp/Status/*.txt $SFC/NetApp/Status/ >/dev/null 2>&1
+
+
+		ModelName=${ModelLable[$i]}
+		find "$SFC/$ModelName/response/config/" -type f -name "*.txt" -size 0 -exec rm -v {} \;
+		mv -f $SFC/$ModelName/response/config/*.txt $WIN/$ModelName/response/config/ >/dev/null 2>&1
+		# C2298 CP provision key files
+		if [ "$ModelName" == "T6G" ]; then
+			find "$SFC/$ModelName/keys/provisions/" -type f -name "*.txt" -size 0 -exec rm -v {} \;
+			mv -f $SFC/$ModelName/keys/provisions/*.txt $WIN/$ModelName/keys/provisions/ >/dev/null 2>&1
+		fi
+
+		# C2398 CP provision key files
+                if [ "$ModelName" == "T6H" ]; then
+                        find "$SFC/$ModelName/keys/provisions/" -type f -name "*.txt" -size 0 -exec rm -v {} \;
+                        mv -f $SFC/$ModelName/keys/provisions/*.txt $WIN/$ModelName/keys/provisions/ >/dev/null 2>&1
+                fi
+
+		# L15 CP provision key files
+		if [ "$ModelName" == "L15" ]; then
+			find "$SFC/$ModelName/keys/provisions/" -type f -name "*.txt" -size 0 -exec rm -v {} \;
+			mv -f $SFC/$ModelName/keys/provisions/*.txt $WIN/$ModelName/keys/provisions/ >/dev/null 2>&1
+		fi
+
+		# chmod all files to read/write and all directory with browseable permission
+		chmod -R a+rw /$WIN/$ModelName/* >/dev/null 2>&1 && chmod -R a+X /$WIN/$ModelName/*
+		chmod -R a+x /$WIN/$ModelName/utils
+		find "$SFC/$ModelName/response/fru/" -type f -name "*.txt" -size 0 -exec rm -v {} \;
+		cp -f $SFC/$ModelName/response/fru/*.txt $WIN/$ModelName/response/fru/ >/dev/null 2>&1
+
+		# cp -uf $WIN/$ModelName/Status/*.ST $WIN/$ModelName/status/ >/dev/null 2>&1
+		# cp -uf $WIN/$ModelName/status/*.ST* $SFC/$ModelName/request/mac/ >/dev/null 2>&1
+		# mv -f $SFC/$ModelName/request/mac/*.ST* $SFC/$ModelName/Status/ >/dev/null 2>&1
+		# FDN20220512 - T6UC TM sync issue test
+
+		# FDN20230131 - S2290 use 'Status' for send2sf
+		find "$WIN/$ModelName/Status/" -type f -name "*.ST" -size 0 -exec rm -v {} \;
+		mv -f $WIN/$ModelName/Status/*.ST $SFC/$ModelName/Status/ >> /var/log/sf_request.log 2>&1
+		#mv -f $WIN/$ModelName/Status/*.ST $SFC/$ModelName/Status/ >/dev/null 2>&1
+		#mv -f $WIN/$ModelName/request/mac/*.ST $SFC/$ModelName/Status/ >/dev/null 2>&1
+
+		# FDN20230131 C2190 use 'status' for send2sf
+		if [ "$ModelName" == "L15" ]; then
+			cp -f $WIN/$ModelName/status/*.ST $WIN/$ModelName/currstatus/ >> /home/edward/swlog.log
+		fi
+
+		mv -f $WIN/$ModelName/status/*.ST $SFC/$ModelName/Status/ >> /var/log/sf_request.log 2>&1
+		#mv -f $WIN/$ModelName/status/*.ST $SFC/$ModelName/Status/ >/dev/null 2>&1
+
+		# FDN20220512 - RMK_I status updates
+		# mv -f $WIN/$ModelName/Status/*.ST $WIN/$ModelName/status/ >/dev/null 2>&1
+		# mv -f $WIN/$ModelName/status/*.ST* /WIN/$ModelName/request/mac/ >/dev/null 2>&1
+
+		find "$WIN/$ModelName/errorlog/" -type f -name "*.log" -size 0 -exec rm -v {} \;
+		mv -f $WIN/$ModelName/errorlog/*.log $SFC/$ModelName/errorlog/ >/dev/null 2>&1
+		find "$WIN/$ModelName/errorlog/" -type f -name "*.txt" -size 0 -exec rm -v {} \;
+		mv -f $WIN/$ModelName/errorlog/*.txt $SFC/$ModelName/collectlog/ >/dev/null 2>&1
+		find "$WIN/$ModelName/passlog/" -type f -size 0 -exec rm -v {} \;
+		mv -f $WIN/$ModelName/passlog/* $SFC/$ModelName/passlog/ >/dev/null 2>&1
+		find "$WIN/$ModelName/FRU/" -type f -name "*.log" -size 0 -exec rm -v {} \;
+		mv -f $WIN/$ModelName/FRU/*.log $SFC/$ModelName/FRU/ >/dev/null 2>&1
+		# mv -f $WIN/$ModelName/AUTOLINK/*.txt $SFC/AUTOLINK/ >/dev/null 2>&1
+
+	done
+	sleep 15
+done
+fi

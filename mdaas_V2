@@ -1,0 +1,954 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+# Copyright (C) 2019 Quanta Computer, Inc.
+#
+# This file is confidential and a trade secret of Quanta Computer, Inc.
+# The receipt of or possession of this file does not convey any rights
+# to reproduce or disclose its contents or to manufacture, use, or sell
+# anything it may describe, in whole, or in part, without the specific
+# written consent of Quanta Computer, Inc.
+#
+# File: mdaas.py
+# Author: Jason.Cheng
+# Date: 2021-04-14
+# 
+
+import sys
+import os
+import time
+import subprocess
+import threading
+import shutil
+import json
+import traceback
+import logging
+import threading
+import logging
+import re
+import glob
+import requests as rq
+import offline_upload_mdaas
+import platform
+
+
+# 0.4 change station indivdually
+# 0.5 add try/except 
+# 0.6 add mdaas change linux to winpe(ipxe)
+# 0.7 add dimm screening mdaas
+# 0.8.1 modify flow
+# 0.8.1.1 fix can not get MDAAS status
+# 1.0 Multiple Stations for MDAAS
+# 1.1 Adding station SHC for Intel processor
+# 1.1.1 Fix issue of Config Stations Not Properly Transitioning
+# 1.2 For C2798 power off and on port is better than system reset
+# 1.3 adding run mdaas if the servers already passed Genconfig
+# 1.4 added load bios default for C2789 after MDAASLINUX to ensure server boot up.
+# 1.5 change the way to get ip in find_uut_ip
+# 2.0 Script is able to check os windows and change the way to reset servers. Mdaas mode changes key word and Bootstrap need to be activated before API in WINDOWS
+
+mdaas_version = "2.0"
+working_dir = "/mdaas"
+win_dir = "/WIN"
+tftp_location = "/tftpboot"
+ipxe_location = "/home/container/ipxe"
+station_list = ['MDAASGENCONFIG','MDAASSHC','MDAASLINUX','MDAASWINDOWS', 'FST', 'NETTEST']
+mdaas_station_list = ['MDAASGENCONFIG','MDAASSHC','MDAASLINUX','MDAASWINDOWS']
+mdaas_status = ['not started', 'starting', 'running', 'finishing', 'finished', 'crashed', 'exception']
+mst_station = "DIMMSCREEN"
+api_mode = "N"
+
+ESC_GREEN="\033[32m"
+ESC_RED="\033[31m"
+ESC_YELLOW_F="\033[33;1m"
+ESC_YELLOW="\033[33m"
+ESC_PINK="\033[35m"
+ESC_LBLUE="\033[36m"
+ESC_OFF="\033[0m"
+
+c2789_location = { '38': 5,'29': 4,'21': 3,'14': 2,'05': 1,}
+
+def get_txt_info(location):
+    info = ""
+    if not os.path.exists(location):
+        logging.error ("Cannot get the file, path = {0}".format(location))
+        return None
+
+    fp = open(location, "r")
+    info = fp.readlines()
+    fp.close()
+    return info
+
+def getresult(arg1):
+    p = subprocess.Popen(arg1, stdout=subprocess.PIPE, shell=True, text=True)
+    (text, err) = p.communicate()
+    return text
+
+def sendlog(message,colour = 0):
+    if colour == 1 :
+        ESC_COLOUR = ESC_GREEN
+    elif colour == 2 :
+        ESC_COLOUR = ESC_RED
+    elif colour == 3 :
+        ESC_COLOUR = ESC_YELLOW
+    elif colour == 4 :
+        ESC_COLOUR = ESC_PINK
+    elif colour == 5 :
+        ESC_COLOUR = ESC_YELLOW_F
+    elif colour == 6 :
+        ESC_COLOUR = ESC_LBLUE
+    else:
+        ESC_COLOUR = ESC_OFF
+        
+    if colour == "PASS" or colour == "FAIL":
+        if colour == "PASS":
+            ESC_COLOUR = ESC_GREEN
+        else :
+            ESC_COLOUR = ESC_RED
+        logging.info(str(message)+"........................."+ESC_COLOUR+"["+colour+"]"+ESC_OFF)
+    else:
+        logging.info(ESC_COLOUR+str(message)+ESC_OFF)
+    cmd = ("echo '{0} ====>> {1}' >>{2}".format(time.strftime("%m-%d-%y-%H:%M:%S"), message, mdaas_dir+"/monitor.log"))
+    os.system(cmd)
+
+def get_set_start_time(running_flag):
+    if not os.path.exists(running_flag):
+        if not os.path.exists(os.path.dirname(running_flag)):
+            os.makedirs(os.path.dirname(running_flag))
+        start_time = time.strftime("%Y%m%d%H%M%S")
+        with open(running_flag, mode="wt") as f:
+            f.write("STARTTIME={0}".format(start_time))
+        f.close()
+        
+    time.sleep(1)
+    info = get_txt_info(running_flag)
+    start_time = info[0].split("=")[1]
+    return start_time
+
+def check_start_time_flag(log_type, sf_sn):
+    running_flag = "{0}/MDAAS/{1}".format(running_flag_dir, sf_sn)
+    if (log_type.upper() == "FAIL"):
+        os.system("rm -f {0}/{1}.txt".format(mdaas_dir, sf_sn))
+        os.system("rm -f " + running_flag)
+    else:
+        if log_type.upper() == "PASS":
+            if (get_station(sf_sn) == station_list[3]):
+                    os.system("rm -f {0}/{1}.txt".format(mdaas_dir, sf_sn))
+                    os.system("rm -f " + running_flag)
+
+def get_station(sf_sn):
+    win_response = "{0}/{1}/response/config".format(win_dir, project)
+    sf_conf_file = "{0}/{1}.txt".format(win_response, sf_sn)
+    if os.path.exists(sf_conf_file):
+        station = getresult("cat {0} | grep -i 'station'".format(sf_conf_file))
+        station = station.split("=")[1].strip()
+        return station
+
+def get_mdaas_os(ip):
+    oscheck_cmd ="curl -k https://{0}:5003/mdaas/version".format(ip)
+    logging.info(oscheck_cmd)
+    ret = getresult(oscheck_cmd)
+    json_api = json.loads(ret)
+    image_version = json_api["detail"]["image_version"].strip().lower()
+    release_version = json_api["detail"]["release_version"]
+    if "linux" in image_version and json_api["detail"]["linux_base_build_version"]:
+        return "linux",release_version
+    elif "win" in image_version and json_api["detail"]["windows_base_build_version"]:
+        return "windows",release_version
+    else:
+        return "unknown os"
+
+def is_cpu_Intel(sf_sn):
+    win_response = f"{win_dir}/{project}/response/config"
+    sf_conf_file = f"{win_response}/{sf_sn}.txt"
+    if os.path.exists(sf_conf_file):
+        cpu = getresult(f"cat {sf_conf_file} | grep -ioc 'CPU[0-9]=intel'")
+        if int(cpu) > 0:
+            return True
+        else:
+            return False
+    
+def get_racksn(sf_sn): #20231127
+    win_response = "{0}/{1}/response/config".format(win_dir, project)
+    sf_conf_file = "{0}/{1}.txt".format(win_response, sf_sn)
+    if os.path.exists(sf_conf_file):
+        racksn = getresult("cat {0} | grep -i 'RACKSN='".format(sf_conf_file))
+        racksn = racksn.split("=")[1].strip()
+        return racksn
+
+def send_data_sf(message, log_type, sf_sn, mdaas_mode, start_time):
+    st_file = "{0}/{1}.ST".format(working_dir, sf_sn)
+    win_st_file = "{0}/{1}.ST".format(win_status, sf_sn)
+    location = find_info(sf_sn,"location")
+    racksn = get_racksn(sf_sn)
+    if "mst" in mdaas_mode:
+        station = "DIMMSCREEN"
+    else:
+        station = get_station(sf_sn)
+    
+    if api_mode == "N":
+        with open(st_file, mode="wt") as f:
+            f.write("SERIAL={0}\n".format(sf_sn))
+            f.write("ERRORS={0}\n".format(message))
+            f.write("STATUS={0}\n".format(log_type))
+            f.write("LOCATI={0}\n".format(location))
+            f.write("STATIO={0}\n".format(station))
+            f.write("STARTT={0}\n".format(start_time))
+            f.close()
+        
+        shutil.copyfile(st_file, win_st_file)
+        retryc = 10
+        count = 0
+        if not os.path.exists(win_st_file) or count > retryc:
+            shutil.copyfile(st_file, win_st_file)
+            count += 1
+        
+        os.system("rm -f {0}".format(st_file))
+    elif api_mode == "Y":
+        if log_type.upper() == "PASS" and "{0} FINISH".format(station) not in message.upper(): #DM if we send PASS, SF API will automatically assume it's STATION PASS, this logic is there to circumvent around that
+            log_type = "RUNNING"
+        os.system("python3 /project/Webapi/api_relay/API_Relay.py send2sf {0} '{1}' {2} {3} {4}".format(sf_sn,message,log_type,station,racksn))
+
+def send2sf(message, log_type, sf_sn, mdaas_mode):
+    message = message.splitlines()[0] # add this to make sure no \r or \n in the end
+    running_flag = "{0}/MDAAS/{1}.txt".format(running_flag_dir, sf_sn)
+    start_time = get_set_start_time(running_flag)   #ADD
+    send_data_sf(message, log_type, sf_sn, mdaas_mode, start_time)
+    check_start_time_flag(log_type, sf_sn)
+    
+
+def find_info(sf_sn,keyword):
+    sf_conf_file = "{0}/{1}.txt".format(win_response, sf_sn)
+    info = get_txt_info(sf_conf_file)
+    key = keyword.upper()
+    if info is not None:
+        for line in info:
+            if key in line:
+                value = line.split("=")[1].strip()
+                return value
+    return "NA"
+
+def find_uut_ip(text, uut_sn):
+    uut_ip = ""
+    ip = ""
+    for line in text:
+        line = line.strip()
+        for mac in line.split(","):
+            # we have find_ip utility, it will return validate IP address
+            #search_ip_cmd = '/usr/local/bin/find_ip {0}'.format(mac)
+            search_ip_cmd = "grep -B8 -A1 {0} /var/lib/dhcpd/dhcpd.leases | grep lease | tail -n 1 | cut -d ' ' -f 2".format(mac)
+            uut_ip = getresult(search_ip_cmd)  # .strip()
+            # if it's ip format, we will have 4 sections
+            if len(uut_ip.split('.')) == 4:
+                uut_ip =  uut_ip.strip()
+                log = "SN={0} MAC={1} IP={2}".format(uut_sn, mac, uut_ip)
+                cmd = "ping -c 3 {0} > /dev/null".format(uut_ip)
+                if os.system(cmd) == 0:
+                        sendlog(log)
+                        ip = uut_ip 
+                        running_flag = "{0}/MDAAS/{1}.txt".format(running_flag_dir, uut_sn)
+                        get_set_start_time(running_flag)
+                        break
+                else: # ping fail
+                        logging.error("ping FAIL, SN={0}, IP={1}".format(uut_sn, uut_ip))
+                        ip = "NA"
+            else:
+                ip = "NA"
+    return ip
+
+def get_eth_mac(sf_sn):
+    sf_conf_file = "{0}/{1}.txt".format(win_response, sf_sn)
+    mac = getresult("cat {0} | grep -i 'ETH0'".format(sf_conf_file))
+    mac = mac.split("=")[1].split(",")[0].strip()
+    return mac
+
+def check_in_mdaas(sf_sn, exp_station):
+    sf_conf_file = "{0}/{1}.txt".format(win_response, sf_sn)
+    if os.path.exists(sf_conf_file):
+        station = getresult("cat {0} | grep -i 'station'".format(sf_conf_file))
+        station = station.split("=")[1].strip()
+        sendlog("{0} is in {1}".format(sf_sn, station))
+        if station == exp_station: #  in MDAAS
+            return True
+        else:
+            return False
+    else:
+        # SF config not exists
+        return False
+
+
+
+def adjust_config_station(sf_sn, local_sf_file,sf_conf_file, current_station, next_station):
+    sendlog("{0} goto {1} station".format(sf_sn, next_station))
+    cmd = f"sed -i 's/STATION={current_station}/STATION={next_station}/g' {local_sf_file}"
+    logging.debug(cmd)
+    os.system(cmd)
+    os.system(f"cp {local_sf_file} {sf_conf_file}")
+    os.system(f"rm -f {local_sf_file}")
+    return 0
+
+def goto_genconfig(sf_sn):
+    sf_conf_file = "{0}/{1}.txt".format(win_response, sf_sn) # /WIN/Project/response/config/SN.txt
+    local_sf_file = "{0}/{1}_SF.txt".format(working_dir, sf_sn) #/mdaas/SN_SF.txt
+    os.system("cp {0} {1}".format(sf_conf_file, local_sf_file))
+    if check_in_mdaas(sf_sn, station_list[1]):
+        current_station = station_list[1]
+    else:
+        current_station = station_list[2]
+    adjust_config_station(sf_sn, local_sf_file,sf_conf_file, current_station, station_list[0])
+    return 0
+
+def goto_next_station(sf_sn):
+    sf_conf_file = "{0}/{1}.txt".format(win_response, sf_sn) # /WIN/Project/response/config/SN.txt
+    local_sf_file = "{0}/{1}_SF.txt".format(working_dir, sf_sn) #/mdaas/SN_SF.txt
+    os.system("cp {0} {1}".format(sf_conf_file, local_sf_file))
+    
+    if check_in_mdaas(sf_sn, station_list[0]): #Check for MDAASGENCONFIG
+        current_station = station_list[0]
+        next_station = station_list[2] # MDAAS_LINUX
+        if is_cpu_Intel(sf_sn):
+            next_station = station_list[1] #MDAAS_SHC
+        adjust_config_station(sf_sn, local_sf_file,sf_conf_file, current_station, next_station)
+        return 0
+    elif check_in_mdaas(sf_sn, station_list[1]): #Check for MDAAS_SHC
+        current_station = station_list[1]
+        next_station = station_list[2] # MDAAS_LINUX
+        adjust_config_station(sf_sn, local_sf_file,sf_conf_file, current_station, next_station)
+        return 0
+    elif check_in_mdaas(sf_sn, station_list[2]): #Check for MDAAS_LINUX
+        current_station = station_list[2]
+        next_station = station_list[3] # MDAAS_WIN
+        adjust_config_station(sf_sn, local_sf_file,sf_conf_file, current_station, next_station)
+        return 0
+    elif check_in_mdaas(sf_sn, station_list[3]): #Check for MDAAS_WIN
+        model = find_info(sf_sn,"PARTN")
+        current_station = station_list[3]
+        next_station = station_list[4] #FST
+        if model == "C2189" or model == "C2789" or model == "C2398" or model == "C2298":
+            next_station = station_list[5] # NETTEST
+        adjust_config_station(sf_sn, local_sf_file,sf_conf_file, current_station, next_station)
+        return 0
+    else:
+        sendlog("{0} is not in {1} station or {2} station ".format(sf_sn, station_list[1], station_list[2]))
+        
+        os.system("rm -f {0}".format(local_sf_file))
+        return 1
+
+def mst_goto_pretest_station(sf_sn):
+    sf_conf_file = "{0}/{1}.txt".format(win_response, sf_sn)
+    local_sf_file = "{0}/{1}_SF.txt".format(working_dir, sf_sn)
+    os.system("cp {0} {1}".format(sf_conf_file, local_sf_file))
+
+    if check_in_mdaas(sf_sn, mst_station):		
+        next_station = "PRETEST" 		
+        sendlog("{0} goto {1} station".format(sf_sn, next_station))
+        cmd = "sed -i 's/{0}/{1}/g' {2}".format(mst_station, next_station, local_sf_file)
+        logging.debug(cmd)
+        os.system(cmd)
+        os.system("cp {0} {1}".format(local_sf_file, sf_conf_file))
+        os.system("rm -f {0}".format(local_sf_file))
+        return 0
+    else:
+        sendlog("{0} is not in {1} station".format(sf_sn, station_list[0]))
+        os.system("rm -f {0}".format(local_sf_file))
+        return 1
+
+def change_ipxe_menu(uut_mac, original, next):
+    uut_mac = uut_mac.lower()
+    ipxe_file = "{6}/{0}-{1}-{2}-{3}-{4}-{5}_menu.ipxe".format(uut_mac[0:2], uut_mac[2:4], uut_mac[4:6], uut_mac[6:8], uut_mac[8:10], uut_mac[10:12], ipxe_location)
+    cmd = "sed -i 's/set menu-default {0}/set menu-default {1}/' {2}".format(original, next, ipxe_file)
+    logging.debug(cmd)
+    os.system(cmd)
+
+def mst_goto_diag_test(uut_mac):
+    uut_mac = uut_mac.lower()
+    ipxe_file = "{6}/{0}-{1}-{2}-{3}-{4}-{5}_menu.ipxe".format(uut_mac[0:2], uut_mac[2:4], uut_mac[4:6], uut_mac[6:8], uut_mac[8:10], uut_mac[10:12], ipxe_location)
+    cmd = "rm -f {0}".format(ipxe_file)
+    logging.debug(cmd)
+    os.system(cmd)
+
+def linux_goto_winpe_mdaas_test(uut_mac):
+    uut_mac = uut_mac.lower()
+    ipxe_file = "{6}/{0}-{1}-{2}-{3}-{4}-{5}_menu.ipxe".format(uut_mac[0:2], uut_mac[2:4], uut_mac[4:6], uut_mac[6:8], uut_mac[8:10], uut_mac[10:12], ipxe_location)
+    cmd = "cp -rf {0}/menu.ipxe_MDAAS_WINDOWS {1}".format(ipxe_location, ipxe_file)
+    logging.debug(cmd)
+    os.system(cmd)
+
+def winpe_goto_diag_test(uut_mac):
+    uut_mac = uut_mac.lower()
+    ipxe_file = "{6}/{0}-{1}-{2}-{3}-{4}-{5}_menu.ipxe".format(uut_mac[0:2], uut_mac[2:4], uut_mac[4:6], uut_mac[6:8], uut_mac[8:10], uut_mac[10:12], ipxe_location)
+    cmd = "rm -f {0}".format(ipxe_file)
+    logging.debug(cmd)
+    os.system(cmd)
+
+def change_image(mac):
+    #tftp_default_file = "{0}/efidefault".format(tftp_location)
+    mac = mac.upper()
+    #To remove the MAC on tftpboot
+    image_mac_file = "{6}/01-{0}-{1}-{2}-{3}-{4}-{5}".format(mac[0:2], mac[2:4], mac[4:6], mac[6:8], mac[8:10], mac[10:12], tftp_location)
+    cmd = "rm -f {0}".format(image_mac_file)
+    logging.debug(cmd)
+    os.system(cmd)
+
+def get_rm_ip(sf_sn):
+    sf_conf_file = "{0}/{1}.txt".format(win_response, sf_sn)
+    if os.path.exists(sf_conf_file):
+        location = getresult("cat {0} | grep -i 'LOCATION'".format(sf_conf_file)).split("=")[1].strip()
+        if "T6G" in project.upper(): #20231026 David add: T6G/T6H have 2 RM
+            if location >= "F27":
+                RACK_MOUNT_MAC = getresult("cat {0} | grep -i 'RACK_MOUNT1_MAC1'".format(sf_conf_file))
+            elif location <= "F21":
+                RACK_MOUNT_MAC = getresult("cat {0} | grep -i 'RACK_MOUNT_MAC1'".format(sf_conf_file))
+
+        elif "T6H" in project.upper(): #20240625 Jenny add: H100/V710 have 2 RM, but Supernova have 1 RM.
+            rackpn = getresult("cat {0} | grep -i 'RACKPN'".format(sf_conf_file))
+            #RACKPN 1L15U9Z0060,1L15U9Z006N is Supernova SKU.
+            if rackpn not in ["1L15U9Z0060","1L15U9Z006N"]:
+                if location >= "F27":
+                    RACK_MOUNT_MAC = getresult("cat {0} | grep -i 'RACK_MOUNT1_MAC1'".format(sf_conf_file))
+                elif location <= "F20":
+                    RACK_MOUNT_MAC = getresult("cat {0} | grep -i 'RACK_MOUNT_MAC1'".format(sf_conf_file))
+            else:
+                #Supernova SKU
+                RACK_MOUNT_MAC = getresult("cat {0} | grep -i 'RACK_MOUNT_MAC1'".format(sf_conf_file))
+        else:
+            RACK_MOUNT_MAC = getresult("cat {0} | grep -i 'RACK_MOUNT_MAC1'".format(sf_conf_file))
+        RACK_MOUNT_MAC = RACK_MOUNT_MAC.split("=")[1].strip()
+        RACK_MOUNT_MAC_TRANS=(RACK_MOUNT_MAC[:2]+':'+RACK_MOUNT_MAC[2:4]+':'+RACK_MOUNT_MAC[4:6]+':'+RACK_MOUNT_MAC[6:8]+':'+RACK_MOUNT_MAC[8:10]+':'+RACK_MOUNT_MAC[10:12])
+        RACK_MOUNT_MAC_TRANS = RACK_MOUNT_MAC_TRANS.lower()
+
+        search_ip_cmd = "grep -i -B8 -A1 {0} /var/lib/dhcpd/dhcpd.leases | grep lease | sort | uniq".format(RACK_MOUNT_MAC_TRANS)
+        ip = getresult(search_ip_cmd)
+        if len(ip) >= 1:
+            ip =  ip.strip().split("{")
+            for line in ip:
+                if line != "":
+                    line = line.split(" ")[1]
+                    log = "get_rm_ip  MAC = {0} IP ={1}".format(RACK_MOUNT_MAC_TRANS,line)
+                    sendlog(log)
+
+                    log = "Check RM Connection IP ={}".format(line)
+                    cmd = "ping -c 3 {}".format(line)
+                    if os.system(cmd) == 0:
+                        sendlog(log)
+                        return line
+                    else:
+                        continue
+                else:
+                    break
+        return 1
+
+def check_ping(ip_address):
+    ping_cmd = ['ping', '-c', '3']
+    ping_cmd.append(ip_address)
+    try:
+        subprocess.run(ping_cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        return True 
+    except subprocess.CalledProcessError:
+        return False  
+#Replace by mdaas cmd reboot
+# def reboot_uut(sf_sn, ip):
+#     '''
+#     Reboot unit through rm
+#     if C2789: -> added load bios default for stability
+#     '''
+#     max_attempts = 5
+#     current_attempts = 0
+#     while check_ping(ip):
+#         current_attempts += 1
+#         sf_conf_file = "{0}/{1}.txt".format(win_response, sf_sn)
+#         # Need to use RM to do power cycle
+#         rm_ip = get_rm_ip(sf_sn)
+#         model = getresult(f"cat {sf_conf_file} | grep -i 'PARTN'").split("=")[1].strip() #Get model
+#         location = getresult("cat {0} | grep -i 'LOCATION'".format(sf_conf_file)).split("=")[1].strip().replace("F", "")
+        
+#         load_bios_default = "set system cmd -c raw 0x38 0x74 0x05 -i {0}".format(location)
+#         load_bios_defaul_ssh_cmd = "sshpass -p '$pl3nd1D' ssh -o 'StrictHostKeyChecking no' -o 'UserKnownHostsFile=/dev/null' root@{0} '{1}'".format(rm_ip, load_bios_default)
+
+#         if model == 'C2789'or model == 'C2189':
+#             if location in c2789_location.keys():
+#                 location = c2789_location[location]
+#             logging.info(load_bios_defaul_ssh_cmd)
+
+#             if os.system(load_bios_defaul_ssh_cmd) == 0:
+#                 print("Executed {0} successfully".format(load_bios_default))
+#                 logging.info("Executed {0} successfully".format(load_bios_default))
+#             else:
+#                 print("Failed to execute {0}".format(load_bios_default))
+#                 logging.info("Failed to execute {0}".format(load_bios_default))
+        
+#             time.sleep(5)
+        
+#         pwr_cmd = "set system reset -i {0}".format(location) #20220524 David modify
+#         ssh_cmd = "sshpass -p '$pl3nd1D' ssh -o 'StrictHostKeyChecking no' -o 'UserKnownHostsFile=/dev/null' root@{0} '{1}'".format(rm_ip, pwr_cmd)
+#         logging.info(ssh_cmd)
+#         if os.system(ssh_cmd) == 0:
+#             print("Executed {0} successfully".format(pwr_cmd))
+#             logging.info("Executed {0} successfully".format(pwr_cmd))
+#         else:
+#             print("Failed to execute {0}".format(pwr_cmd))
+#             logging.info("Failed to execute {0}".format(pwr_cmd))
+            
+#         if (current_attempts >= max_attempts):
+#             print("Failed: Max attempts reached rebooting {0} with ip: {1}. Exit!".format(sf_sn,ip))
+#             logging.info("Failed: Max attempts reached rebooting {0} with ip: {1}".format(sf_sn,ip))
+#             exit
+
+def power_off_uut(sf_sn):#20220606 David add
+    sf_conf_file = "{0}/{1}.txt".format(win_response, sf_sn)
+    # Need to use RM to do power off
+    rm_ip = get_rm_ip(sf_sn)
+    location = getresult("cat {0} | grep -i 'LOCATION'".format(sf_conf_file)).split("=")[1].strip().replace("F", "")
+    model = getresult(f"cat {sf_conf_file} | grep -i 'PARTN'").split("=")[1].strip() #Get model
+    if model == 'C2789'or model == 'C2189':
+        if location in c2789_location.keys():
+            location = c2789_location[location]
+    pwr_cmd = "set system off -i {0}".format(location)
+    ssh_cmd = "sshpass -p '$pl3nd1D' ssh -o 'StrictHostKeyChecking no' -o 'UserKnownHostsFile=/dev/null' root@{0} '{1}'".format(rm_ip, pwr_cmd)
+    sendlog(ssh_cmd)
+    os.system(ssh_cmd)
+
+def check_SF_flag(sf_sn):
+    sf_conf_file = "{0}/{1}.txt".format(win_response, sf_sn)
+    rack_sn = getresult("cat {0} | grep -i 'RACKSN'".format(sf_conf_file)).split("=")[1].strip()
+    # FIXME: need to modify the flag path
+    SF_flag = "{0}/{1}_mdaas.txt".format("test", rack_sn)
+
+    if os.path.isfile(SF_flag):
+        return True
+    else:
+        return False
+
+def get_log_from_mdass(ip, mdaas_mode, chs_sn):
+    
+    cmd = "curl -k https://{0}:5003/mdaas/blob_list".format(ip)
+    ret = getresult(cmd)
+    log_list = ret.split("[")[1].split("]")[0].split(",")
+    for log in log_list:
+        log = log.strip().replace("\"", "")
+        if "START.zip" in log or "END.zip" in log:
+            cmd = "curl -k -O https://{0}:5003{1}".format(ip, log)
+            logging.info(cmd)
+            os.system(cmd)
+            if "mst" in mdaas_mode:
+                #/RACKLOG/t6ub/MDAAS/DIMM_SCREENING
+                log_path = "/RACKLOG/{0}/MDAAS/DIMM_SCREENING/{1}".format(project.lower(), time.strftime("%Y%m%d"))
+            else:
+                #/RACKLOG/t6ub/MDAAS
+                log_path = "/RACKLOG/{0}/MDAAS/{1}".format(project.lower(), time.strftime("%Y%m%d"))
+            if not os.path.exists(log_path):
+                os.system("mkdir -p {}".format(log_path))
+            
+            log_file = log.split("/")[-1]
+
+            #Copy of Log to Include CSN and MDAAS Station
+            try:
+                os.system(f"cp {log_file} {log_path}/{mdaas_mode}_{chs_sn}_{log_file}") 
+            except Exception as e:
+                print (e)
+
+            os.system("mv {0} {1}".format(log_file, log_path))
+
+def check_mdaas_mode_station(chs_sn, mdaas_mode):
+    sf_conf_file = "{0}/{1}.txt".format(win_response, chs_sn) # /WIN/Project/response/config/SN.txt
+    local_sf_file = "{0}/{1}_SF.txt".format(working_dir, chs_sn) #/mdaas/SN_SF.txt
+    currentstation = get_station(chs_sn)
+    
+    if mdaas_mode == "L10__genconfig":
+        if currentstation != 'MDAASGENCONFIG':
+            # adjust_config_station(chs_sn, local_sf_file,sf_conf_file, currentstation, 'MDAASGENCONFIG')
+            sendlog("Station Mismatch Config Should be MDAASGENCONFIG - Changing Station to MDAASGENCONFIG".format(chs_sn))
+            send2sf("Station Mismatch Config Should be MDAASGENCONFIG - Changing Station to MDAASGENCONFIG", "WARNING", chs_sn, mdaas_mode)
+            goto_genconfig(chs_sn)
+    elif mdaas_mode == "SHC":
+        if currentstation != 'MDAASSHC':
+            sendlog("Station Mismatch Config Should be MDAASSHC".format(chs_sn))
+            send2sf("Station Mismatch Config Should be MDAASSHC", "WARNING", chs_sn, mdaas_mode)
+            return True
+    elif mdaas_mode == "L10":
+        if currentstation != 'MDAASLINUX':
+            sendlog("Station Mismatch Config Should be MDAASLINUX".format(chs_sn))
+            send2sf("Station Mismatch Config Should be MDAASLINUX", "WARNING", chs_sn, mdaas_mode)
+            return True
+    elif mdaas_mode == "L10__windows":
+        if currentstation != 'MDAASWINDOWS':
+            sendlog("Station Mismatch Config Should be MDAASWINDOWS".format(chs_sn))
+            send2sf("Station Mismatch Config Should be MDAASWINDOWS", "WARNING", chs_sn, mdaas_mode)
+            return True
+    else:
+        return False	
+
+def query_mdaas_status(chs_sn, ip):
+    # mdaas_mode = "Unknown"
+    # if (get_station(chs_sn) not in mdaas_station_list):
+    # 	sendlog("{0} Unit Config In Wrong Station For MDAAS".format(chs_sn))
+    # 	send2sf("Unit Config In Wrong Station For MDAAS", "WARNING", chs_sn, mdaas_mode)
+    # 	uut_mac = get_eth_mac(chs_sn)
+    # 	winpe_goto_diag_test(uut_mac)
+    # 	return 1
+    query_cmd = "curl -k https://{0}:5003/mdaas/status".format(ip)
+    query_cmd_bootstrap = f"curl -k https://{ip}:5005/mdaas/bootstrap"
+    mdaas_cmd_post =  f"curl -X POST -k https://{ip}:5003/mdaas/workflow -H 'Content-Type: application/json' -d "
+    mdaas_cmd_post_bootstrap = f"curl -X POST -k https://{ip}:5005/mdaas/bootstrap -H 'Content-Type: application/json' -d "
+    mdaas_cmd_flow_l10 = "'{\"flow\": \"L10\", \"site\": \"QMF\"}'"
+    mdaas_cmd_beta_l10 = "'{\"flow\": \"L10\", \"site\": \"QMF\",\"stage\": \"Beta\", \"validation\": \"true\"}'"
+    mdaas_cmd_flow_shc = "'{\"flow\": \"SHC\", \"site\": \"QMF\"}'"
+    mdaas_cmd_flow_windows = "'{\"site\": \"QMF\", \"state\": \"prod\"}'"
+    mdaas_cmd_flow_bootstrap_edge = "'{\"stage\": \"edge/single_registry\", \"site\": \"QMF\"}'"
+    mdaas_cmd_flow_bootstrap = "'{\"stage\": \"Prod\", \"site\": \"QMF\"}'"
+    mdaas_cmd_flow_l10_edge = "'{\"flow\": \"L10\", \"site\": \"QMF\", \"stage\": \"edge/single_registry\" }'"
+    genconfig_cmd_post = "curl -X POST -k https://{0}:5003/mdaas/workflow -H 'Content-Type: application/json' -d ".format(ip)
+    genconfig_cmd_L10__genconfig ="'{\"genconfig_mode\": \"true\", \"site\": \"QMF\", \"flow\": \"L10\"}'" # Original 
+    genconfig_cmd_beta = "'{\"genconfig_mode\": \"true\", \"site\": \"QMF\", \"flow\": \"L10\",\"stage\": \"Beta\"}'" # Beta
+    genconfig_cmd_edge= "'{\"genconfig_mode\": \"true\", \"site\": \"QMF\", \"flow\": \"L10\",\"stage\": \"edge/single_registry\"}'"
+    mdaas_cmd_reboot = f"curl -X POST -k https://{ip}:5003/mdaas/reboot"
+    logging.info(query_cmd)
+    temp = {}
+    if ip != "NA" and ip != "":
+        ret = getresult(query_cmd)
+        if "status" not in ret:
+            ret_bootstrap = getresult(query_cmd_bootstrap)
+            logging.info(query_cmd_bootstrap)
+            if "status" not in ret and "status" not in ret_bootstrap:
+                sendlog("Can not get MDAAS status")
+                return 1
+            else:
+                temp_bootstrap = json.loads(ret_bootstrap)
+        else:
+            temp = json.loads(ret)
+        
+        
+        try:
+            mdaas_mode = temp["detail"]["mdaas_mode"].strip()
+            if (get_station(chs_sn) not in mdaas_station_list):
+                sendlog("{0} Unit Config In Wrong Station For MDAAS".format(chs_sn))
+                send2sf("Unit Config In Wrong Station For MDAAS", "WARNING", chs_sn, mdaas_mode)
+                uut_mac = get_eth_mac(chs_sn)
+                winpe_goto_diag_test(uut_mac)
+                logging.info(f"Remove the status flag inside unit config is wrong")
+                return 1
+            if (check_mdaas_mode_station ( chs_sn, mdaas_mode)):
+                return 1
+        except KeyError:
+            mdaas_mode = "Unknown"
+        
+        test_finish = False
+        log = "MDAAS test"
+        if "status" in temp:
+            status = temp["status"].strip()
+            logging.debug(f'mdaas status:{status}')
+            os , image_version = get_mdaas_os(ip)
+            sendlog(f'{chs_sn} is on {os.upper()} OS with {image_version}')
+            if status == "finished":
+                url = f"https://{ip}:5003/mdaas/configs" #Status return 200 for golden config ready 
+                response = rq.get(url, verify = False)    	
+                status_code = response.status_code
+                if status_code == 200 and mdaas_mode == "L10__genconfig": #L10__genconfig is golden config generating step
+                    download_cmd = "cd /home/container/configs; curl -k https://{0}:5003/mdaas/configs -O -J".format(ip)
+                    logging.info(download_cmd)
+                    ret = getresult(download_cmd)
+                    sendlog("{0} Config Finished Generating".format(chs_sn))
+                    send2sf("MDAASGENCONFIG FINISH", "PASS", chs_sn, mdaas_mode)
+                    if (get_station(chs_sn) == "MDAASGENCONFIG"):
+                        goto_next_station(chs_sn) #Go to Linux/SHC
+                    time.sleep(3)    
+                    sendlog(f"{chs_sn} is rebooted after Genconfig")
+#                    send2sf("{0} Server Is Rebooting After Genconfig".format(chs_sn), "RUNNING", chs_sn, mdaas_mode)
+                    #Reboot the server by mdaas command
+                    ret = getresult(mdaas_cmd_reboot)
+                    
+                elif mdaas_mode == "SHC" or mdaas_mode == "L10" or mdaas_mode == "L10__windows":
+                    test_finish = True 
+            elif status != "not started":
+                progress = " {0}, {1}/{2}".format(temp["desc"], temp['current'], temp['items'])
+                send2sf(log + progress, status.replace(" ", "").upper(), chs_sn, mdaas_mode)
+                
+            elif status == "not started":
+                if check_in_mdaas(chs_sn,station_list[1]):  
+                    if is_cpu_Intel(chs_sn):
+                        run_mdaas_shc = mdaas_cmd_post + mdaas_cmd_flow_shc #Running SHC for Intel chip
+                        logging.info(run_mdaas_shc)
+                        ret = getresult(run_mdaas_shc)
+                        time.sleep(1)
+                        sendlog(f"{chs_sn} SHC Starting in version {image_version}")
+                elif check_in_mdaas(chs_sn,station_list[2]) and os == "linux": #Mdaas Linux Runs
+                    run_mdaas_linux = mdaas_cmd_post + mdaas_cmd_flow_l10
+                    logging.info(run_mdaas_linux)
+                    ret = getresult(run_mdaas_linux)
+                    time.sleep(1) 
+                    sendlog("{0} Linux V2 Starting In Version {1}".format(chs_sn, image_version))
+                elif check_in_mdaas(chs_sn,station_list[3]) and os == "windows": #Mdaas Windows runs
+                    run_mdaas_windows = mdaas_cmd_post + mdaas_cmd_flow_l10
+                    logging.info(run_mdaas_windows)
+                    ret = getresult(run_mdaas_windows)
+                    time.sleep(1)
+                    sendlog("{0} Windows V2 Starting In Version {1}".format(chs_sn,image_version))
+                else:
+                    run_genconfig = genconfig_cmd_post + genconfig_cmd_L10__genconfig
+                    sendlog("{0} Generating Config in version {1}".format(chs_sn, image_version))
+                    send2sf("{0} Generating Config".format(chs_sn), "RUNNING", chs_sn, mdaas_mode)
+                    logging.info(run_genconfig)
+                    ret = getresult(run_genconfig)
+        elif "status" in temp_bootstrap: #server is in windows and need to active the bootstrap
+            status = temp_bootstrap["status"].strip()
+            if status == "not started":
+                if check_in_mdaas(chs_sn,station_list[3]):
+                    run_mdaas_bootstrap = mdaas_cmd_post_bootstrap + mdaas_cmd_flow_bootstrap
+                    logging.info(run_mdaas_bootstrap)
+                    ret = getresult(run_mdaas_bootstrap)
+                    time.sleep(1)
+                    sendlog(f"{chs_sn} Bootstrap service is activated")
+            
+
+        if test_finish:
+            test_result = temp["test_result"].strip()
+            azure_upload = temp["azure_upload"].strip() 
+            azure = temp['detail'].get('azure')
+            mdaas_mode = temp["detail"]["mdaas_mode"].strip() 
+            status = temp["status"].strip()
+
+            logging.debug(f'test_result:{test_result}, azure_upload:{azure_upload}, azure:{azure}')
+
+            if azure is None:
+                return
+            azure = azure.strip()
+
+            # get MDAAS log
+            get_log_from_mdass(ip, mdaas_mode, chs_sn)
+            log = "MDAAS"
+            sendlog(f"{chs_sn} has {status} status in {mdaas_mode} mode with {test_result} result")
+            if "passed" in test_result and "succeeded" in azure_upload and "up" in azure:  #PASS
+                if mdaas_mode == "SHC":
+                    sendlog(f"{chs_sn} MDAAS SHC is finised")
+                    send2sf("MDAASSHC FINISH", "PASS", chs_sn, mdaas_mode)
+                    time.sleep(1)
+                    goto_next_station(chs_sn)
+                    run_mdaas_linux = mdaas_cmd_post + mdaas_cmd_flow_l10 #Running MDAAS LINUX
+                    logging.info(run_mdaas_linux)
+                    ret = getresult(run_mdaas_linux)
+                    time.sleep(1)
+                    sendlog("{0} Linux V2 Starting".format(chs_sn))
+                elif mdaas_mode == "L10": 	
+                    sendlog(f"{chs_sn} MDAAS Linux FINISH, goto MDAAS windows test")
+                    # send2sf(f"{chs_sn} MDAAS Linux FINISH, goto MDAAS windows test", "PASS", chs_sn, mdaas_mode)
+                    send2sf("MDAASLINUX FINISH", "PASS", chs_sn, mdaas_mode)
+                    if (get_station(chs_sn) == "MDAASLINUX"):
+                        goto_next_station(chs_sn) #Go to Windows
+                    uut_mac = get_eth_mac(chs_sn)	
+                    linux_goto_winpe_mdaas_test(uut_mac)
+                    ret = getresult(mdaas_cmd_reboot)
+                    sendlog(f"{chs_sn} is rebooted")
+                elif mdaas_mode == "L10__windows":
+                    sendlog(f"{chs_sn} MDAAS Windows FINISH")
+                    send2sf("MDAASWINDOWS FINISH".format(log), "PASS", chs_sn, mdaas_mode)
+                    check_start_time_flag("PASS", chs_sn)
+                    uut_mac = get_eth_mac(chs_sn)
+                    # change_image(uut_mac)
+                    winpe_goto_diag_test(uut_mac)
+                    #change_ipxe_menu(uut_mac, "winpe", "diag")
+                    if (get_station(chs_sn) == "MDAASWINDOWS"):
+                            goto_next_station(chs_sn) #Go to FST
+                    sendlog(f"{chs_sn} is power off")
+                    power_off_uut(chs_sn)
+            elif "mst" in mdaas_mode: # 20220601 David add (MST test result will not upload to Azure)	
+                if 	"passed" in test_result:
+                    sendlog("{0} DIMMSCREEN FINISH".format(log))
+                    send2sf("{0} DIMMSCREEN FINISH".format(log), "PASS", chs_sn, mdaas_mode)
+                    check_start_time_flag("PASS", chs_sn)
+                    uut_mac = get_eth_mac(chs_sn)
+                    mst_goto_diag_test(uut_mac)
+                    mst_goto_pretest_station(chs_sn)
+                    ret = getresult(mdaas_cmd_reboot)
+                    sendlog(f"{chs_sn} is rebooted")
+                elif "fail" in test_result:
+                    check_start_time_flag("FAIL", chs_sn)
+                    fail_msg = ""
+                    for item in temp["history"]:
+                        if "fail" in item["status"]:
+                            fail_msg = fail_msg + item["err_msg"] + " "
+                    sendlog("{0} DIMMSCREEN FAIL, {1}".format(log, fail_msg))
+                    send2sf("{0} DIMMSCREEN FAIL, {1}".format(log, fail_msg), "FAIL", chs_sn, mdaas_mode)
+                else:
+                    check_start_time_flag("FAIL", chs_sn)
+                    send2sf("Test result not expected", "FAIL", chs_sn, mdaas_mode)
+            else:
+                if "passed" in test_result and "succeeded" not in azure_upload:
+                    try:
+                        sendlog(f"{chs_sn} : curl_result : {ret}")
+                    except Exception as e:
+                        print(e)
+                    sendlog("{0} MDaaS Data Upload Failed - Attempting Retry ".format(chs_sn))
+                    send2sf("{0} MDaaS Data Upload Failed - Attempting Retry".format(chs_sn), "WARNING", chs_sn, mdaas_mode)
+                    result = get_log_from_mdass_and_upload(chs_sn, ip, mdaas_mode) 
+                    if result == 'PASS':
+                        if mdaas_mode == "SHC":
+                            sendlog(f"{chs_sn} MDAAS SHC is finised")
+                            send2sf("MDAASSHC FINISH", "PASS", chs_sn, mdaas_mode)
+                            time.sleep(1)
+                            goto_next_station(chs_sn)
+                            run_mdaas_linux = mdaas_cmd_post + mdaas_cmd_flow_l10 #Running MDAAS LINUX
+                            logging.info(run_mdaas_linux)
+                            ret = getresult(run_mdaas_linux)
+                            time.sleep(1)
+                            sendlog("{0} Linux Starting".format(chs_sn))
+                        elif mdaas_mode == "L10":
+                            sendlog(f"{chs_sn} MDAAS Linux FINISH, goto MDAAS windows test")
+                            # send2sf("{0} Linux FINISH, goto MDAAS windows test".format(log), "PASS", chs_sn, mdaas_mode)
+                            send2sf("MDAASLINUX FINISH", "PASS", chs_sn, mdaas_mode)
+                            if (get_station(chs_sn) == "MDAASLINUX"):
+                                goto_next_station(chs_sn) #Go to Windows
+                            uut_mac = get_eth_mac(chs_sn)	
+                            linux_goto_winpe_mdaas_test(uut_mac)
+                            ret = getresult(mdaas_cmd_reboot)
+                            sendlog(f"{chs_sn} is rebooted")						
+                        elif mdaas_mode == "L10__windows":
+                            sendlog("MDAASWINDOWS FINISH - Data Uploaded by Offline")
+                            send2sf("MDAASWINDOWS FINISH - Data Uploaded by Offline", "PASS", chs_sn, mdaas_mode)
+                            check_start_time_flag("PASS", chs_sn)
+                            uut_mac = get_eth_mac(chs_sn)
+                            winpe_goto_diag_test(uut_mac)
+                            if (get_station(chs_sn) == "MDAASWINDOWS"):
+                                goto_next_station(chs_sn) #Go to FST
+                            sendlog(f"{chs_sn} is power off")
+                            power_off_uut(chs_sn)
+                 
+                elif "passed" in test_result and "up" not in azure:
+                    sendlog("{0} MDaaS Network Connection Failed - Attempting Retry ".format(chs_sn))
+                    send2sf("{0} MDaaS Network Connection Failed - Attempting Retry".format(chs_sn), "WARNING", chs_sn, mdaas_mode)
+                    result = get_log_from_mdass_and_upload(chs_sn, ip, mdaas_mode)
+                    if result == 'PASS':
+                        if mdaas_mode == "SHC":
+                            sendlog(f"{chs_sn} MDAAS SHC is finised")
+                            send2sf("MDAASSHC FINISH", "PASS", chs_sn, mdaas_mode)
+                            time.sleep(1)
+                            goto_next_station(chs_sn)
+                            run_mdaas_linux = mdaas_cmd_post + mdaas_cmd_flow_l10 #Running MDAAS LINUX
+                            logging.info(run_mdaas_linux)
+                            ret = getresult(run_mdaas_linux)
+                            time.sleep(1)
+                            sendlog("{0} Linux Starting".format(chs_sn))
+                        elif mdaas_mode == "L10":
+                            sendlog(f"{chs_sn} MDAAS Linux FINISH, goto MDAAS windows test")
+                            # send2sf("{0} Linux FINISH, goto MDAAS windows test".format(log), "PASS", chs_sn, mdaas_mode)
+                            send2sf("MDAASLINUX FINISH", "PASS", chs_sn, mdaas_mode)
+                            if (get_station(chs_sn) == "MDAASLINUX"):
+                                goto_next_station(chs_sn) #Go to WINDOWS
+                            uut_mac = get_eth_mac(chs_sn)	
+                            linux_goto_winpe_mdaas_test(uut_mac)
+                            ret = getresult(mdaas_cmd_reboot)
+                            sendlog(f"{chs_sn} is rebooted")
+                        elif mdaas_mode == "L10__windows":
+                            sendlog("MDAASWINDOWS FINISH - Data Uploaded by Offline")
+                            send2sf("MDAASWINDOWS FINISH - Data Uploaded by Offline", "PASS", chs_sn, mdaas_mode)
+                            check_start_time_flag("PASS", chs_sn)
+                            uut_mac = get_eth_mac(chs_sn)
+                            winpe_goto_diag_test(uut_mac)
+                            if (get_station(chs_sn) == "MDAASWINDOWS"):
+                                    goto_next_station(chs_sn) #Go to FST
+                            power_off_uut(chs_sn)
+                            sendlog(f"{chs_sn} is power off")
+                elif "fail" in test_result:
+                    check_start_time_flag("FAIL", chs_sn)
+                    fail_msg = ""
+                    for item in temp["history"]:
+                        if "fail" in item["status"]:
+                            fail_msg = fail_msg + item["err_msg"] + " "
+                    sendlog("{0} FAIL, {1}".format(log, fail_msg))
+                    send2sf("{0} FAIL, {1}".format(log, fail_msg), "FAIL", chs_sn, mdaas_mode)
+                else:
+                    check_start_time_flag("FAIL", chs_sn)
+                    send2sf("Test result not expected", "FAIL", chs_sn, mdaas_mode)
+                    
+                
+def get_log_from_mdass_and_upload(chs_sn, ip, mdaas_mode):
+    cmd = "curl -k https://{0}:5003/mdaas/blob_list".format(ip)
+    ret = getresult(cmd)
+    log_list = ret.split("[")[1].split("]")[0].split(",")
+    files_to_upload = []
+    for log in log_list:
+        log = log.strip().replace("\"", "")
+        if "START.zip" in log or "END.zip" in log:
+            cmd = "curl -k -O https://{0}:5003{1}".format(ip, log)
+            logging.info(cmd)
+            os.system(cmd)
+            log_file = log.split("/")[-1]
+            files_to_upload.append(log_file)
+    status_result = offline_upload_mdaas.upload_files(files_to_upload)
+    result = ''
+    if (len(status_result)>0):
+        if ('FAIL' in status_result):
+            sendlog("{0} MDaaS Data Upload Failed - Attempting Retry ".format(chs_sn))
+            send2sf("{0} MDaaS Data Upload Failed WARNING".format(chs_sn), "WARNING", chs_sn, mdaas_mode)
+            result = 'FAIL'
+        else:
+            result = 'PASS'
+
+    for file in files_to_upload:
+        os.system("rm {0}".format(file))
+
+    return result
+
+
+def monitor_by_blade(chs_sn):
+    mac_file = mdaas_dir+"/"+chs_sn+".txt"
+    # Get blade mac
+    info = get_txt_info(mac_file)
+    # Use mac to find UUT IP
+    ip = find_uut_ip(info, chs_sn)
+    # Use IP to query MDAAS status
+    if ip == 'NA':
+        file_time = os.path.getmtime(mac_file)
+        # if file is 3 days older, then delete it.
+        if (time.time() - file_time) /3600 > 24*3:
+            os.unlink(mac_file)
+    query_mdaas_status(chs_sn, ip)
+
+def init_monitor():
+    if not os.path.isdir(working_dir):
+        os.system("mkdir -p " + working_dir)
+
+    if not os.path.isdir(mdaas_dir):
+        os.system("mkdir -p " + mdaas_dir)
+
+    if not os.path.isdir(running_flag_dir):
+        os.system("mkdir -p " + running_flag_dir)
+
+def usage():
+    print("{0}: <Project code>".format(sys.argv[0]))
+
+
+if __name__ == "__main__":
+
+    if len(sys.argv) == 1:
+        usage()
+        exit(1)
+
+    if len(sys.argv) > 1:
+        project = sys.argv[1]
+
+
+    logging.basicConfig(level=logging.INFO, format='%(asctime)s %(message)s')	
+    win_status = "{0}/{1}/status".format(win_dir, project)
+    win_response = "{0}/{1}/response/config".format(win_dir, project)  # by project list?
+    mdaas_dir = "{0}/{1}/MDAAS/".format(win_dir, project) #"/SFC/{0}/response/MDAAS".format(project)
+    running_flag_dir = "{0}/{1}/running_flag".format(win_dir, project)
+
+    init_monitor()
+    cmd = "ls {0}| egrep -i '\.txt'".format(mdaas_dir)
+    try:
+        ret = getresult(cmd).strip()
+        if ret != "":
+            for line in ret.split("\n"):
+                chs_sn = line.split(".")[0]
+                t = threading.Thread(target=monitor_by_blade, args=(chs_sn,))
+                t.start()
+                time.sleep(1)
+    except Exception as e:
+        error_class = e.__class__.__name__  #?��??�誤類�?
+        detail = e.args[0] #?��?詳細?�容
+        cl, exc, tb = sys.exc_info() #?��?Call Stack
+        lastCallStack = traceback.extract_tb(tb)[-1] #?��?Call Stack?��?後�?筆�???
+        fileName = lastCallStack[0] #?��??��??��?案�?�?
+        lineNum = lastCallStack[1]  #?��??��??��???
+        funcName = lastCallStack[2] #?��??��??�函?��?�?
+        errMsg = "File \"{0}\", line {1}, in {2}: [{3}] {4}".format(fileName, lineNum, funcName, error_class, detail)
+        sendlog (errMsg)
