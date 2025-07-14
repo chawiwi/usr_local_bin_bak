@@ -68,6 +68,11 @@ rm_firmware_path = "firmware/{0}/RM/".format(g_project.lower())
 upgrade_image = "overlake-{0}-prod.img"
 #g_cp_Cerberus_fw="cerberus_v2.4.11.4.bin"
 #g_cp_Cerberus_fw_loc="/project/firmware/{0}/cp/{1}".format(g_project.lower(),g_cp_Cerberus_fw)
+g_overlake_md5sum = {"overlake-2008.6.23101601-prod.img":"784d222f1f8b233543be00c5c1c90bd3",
+                     "overlake-2008.4.23031201-prod.img":"e46ab936432f817b4da8037239f44218",
+                     "overlake-1908.5.22022401-prod.img":"06459d32386890fef25703de711f0fcb"}
+replace_image_name = {"0002.17.240911-prd":["dropcp-2.17FW-stos2008.6.23101601","dropcp-2.17.1FW-stos2008.6.23101601"]}
+replace_md5 = {"overlake-2008.6.23101601-prod.img":["784d222f1f8b233543be00c5c1c90bd3","e5075189b5e8cfdb0017e21a1d6b3d86"]}
 #####################
 # RM Command Define #
 #####################
@@ -575,21 +580,48 @@ def read_sn_info_from_config(file_name):
     
     return 1
 
+def get_image_directory(sn_info_list):
+    # Get correct directory by checking which one contains the correct nitro file
+    nitro_pfm_file = "A2040.NITRO.PFM.{}.bin".format(int(sn_info_list["CP_SOC_NITRO_PFMID"], 16))
+    upgrade_image_file = upgrade_image.format(sn_info_list["CP_SOC_OS_FW"])
+    res = getresult(f"find /tftpboot/firmware/Celestial_Peak/ -name {upgrade_image_file}")
+    if res != "":
+        check_directories = res.splitlines()
+        image_path = None
+        for directory in check_directories:
+            path = directory.split(upgrade_image_file)[0]
+            base_path = re.match(r"(/tftpboot/firmware/Celestial_Peak/.*?/)", path)[0]
+
+            # Check whether other firmware files are in this directory
+            res = getresult(f"find {base_path} -name {nitro_pfm_file}")
+            if res != "":
+                image_path = path
+                break
+
+        if image_path is None:
+            image_path = path
+
+        image_path = image_path.replace("/tftpboot/", "")
+        
+        # For sanity, ensure image path is correct using hardcoded data for certain firmware versions
+        # 20250421 WayneXu 0002.17.240911-prd use the same image name compare to previous version
+        if sn_info_list["CP_SOC_FIP_FW"] in replace_image_name and sn_info_list["CP_SOC_NITRO_FW"] in replace_image_name:
+            image_path = image_path.replace(replace_image_name[sn_info_list["CP_SOC_FIP_FW"]][0],replace_image_name[sn_info_list["CP_SOC_FIP_FW"]][1])
+        return image_path
+    else:
+        sendlog("[RACKSN:{0} SN:{1}] Cannot find CP SOC image path".format(sn_info_list["RACKSN"], sn_info_list["sn"]), RED)
+        return None
+
 def update_soc_fw(sn_info_list):	  
     CP_IP=""
-
-
-    g_cp_Cerberus_fw="cerberus_v{0}.bin".format(sn_info_list["CP_CERBERUS_FW"])
-    g_cp_Cerberus_fw_loc="/project/firmware/{0}/cp/{1}".format(g_project.lower(),g_cp_Cerberus_fw)
-
-    cmd = "find /tftpboot/firmware/Celestial_Peak/ -name {}".format(upgrade_image.format(sn_info_list["CP_SOC_OS_FW"]))
-    res = getresult(cmd)
-    if res != "":
-        image_path = res.split(upgrade_image.format(sn_info_list["CP_SOC_OS_FW"]))[0].replace("/tftpboot/","")
-    else:
-        print("[RACKSN:{0} SN:{1}] Cannot find CP SOC image path".format(sn_info_list["RACKSN"], sn_info_list["sn"]), RED)
+    sn_log_folder = "{0}/{1}".format(g_log_folder, sn_info_list["sn"])
+    log_name = "{0}_update_rm_fw.log".format(sn_info_list["sn"])
+    log_path = "{0}/{1}".format(sn_log_folder, log_name)
+    upload_img_flag = "{0}/{1}_overlakeimg_flag_{2}.log".format(g_log_folder,sn_info_list["RACKSN"], sn_info_list["master_rm_port"])
+    image_path = get_image_directory(sn_info_list)
+    if image_path is None:
         return 1
-    
+
     #Login to RM switch
     ssh_object = login_rm(sn_info_list)
     if ssh_object == None:
@@ -606,26 +638,71 @@ def update_soc_fw(sn_info_list):
     else:
         if res != "":
             if upgrade_image.format(sn_info_list["CP_SOC_OS_FW"]) in res:
-                print("[RACKSN:{0} SN:{1}] {2} image from TFTP to RM success !".format(sn_info_list["RACKSN"],sn_info_list["sn"], upgrade_image.format(sn_info_list["CP_SOC_OS_FW"])))
+                #20250421WayneXu add md5 check
+                if upgrade_image.format(sn_info_list["CP_SOC_OS_FW"]) in g_overlake_md5sum:
+                    overlake_md5 = g_overlake_md5sum[upgrade_image.format(sn_info_list["CP_SOC_OS_FW"])]
+                    #20250421 WayneXu 0002.17.240911-prd use the same image name compare to previous version
+                    if sn_info_list["CP_SOC_FIP_FW"] in replace_image_name and sn_info_list["CP_SOC_NITRO_FW"] in replace_image_name:
+                        overlake_md5 = replace_md5[upgrade_image.format(sn_info_list["CP_SOC_OS_FW"])][1]
+                    get_md5 = ""
+                    lines = res.strip().split('\n')
+                    for i, line in enumerate(lines):
+                        if sn_info_list["CP_SOC_OS_FW"] in line:
+                            get_md5 = lines[i-2].split(":")[1].strip()
+                    if get_md5 != overlake_md5:
+                        sendlog("overlake md5sum not equal with database!! get: {0}  expect: {1}".format(get_md5, overlake_md5), 0, log_path)
+                        #Remove file on RM
+                        ret, res = send_cmd_to_rm(ssh_object, sn_info_list, g_cmd_del_tftp_file.format(upgrade_image.format(sn_info_list["CP_SOC_OS_FW"])), 10, log_path)
+                        if ret != 0:
+                            return 1
+                        else:
+                            if res != "":
+                                if is_success(res):
+                                    sendlog("[RACKSN:{0} SN:{1}] Remove file from RM success !".format(sn_info_list["RACKSN"],sn_info_list["sn"]))
+                                else:
+                                    sendlog("[RACKSN:{0} SN:{1}] Remove file from RM fail !".format(sn_info_list["RACKSN"],sn_info_list["sn"]))
+                                    return 1
+                            else:
+                                sendlog("[RACKSN:{0} SN:{1}] Can not get result - Remove file from RM".format(sn_info_list["RACKSN"],sn_info_list["sn"]))
+                                return 1
+                        #Copy image from TFTP to RM
+                        ret, res = send_cmd_to_rm(ssh_object, sn_info_list, g_cmd_copy_image_to_rm.format(tftp_ip, image_path, upgrade_image.format(sn_info_list["CP_SOC_OS_FW"])), 200, log_path)
+                        if ret != 0:
+                            return 1
+                        else:
+                            if res != "":
+                                if is_success(res):
+                                    os.system("touch {0}".format(upload_img_flag))
+                                    sendlog("[RACKSN:{0} SN:{1}] Copy image from TFTP to RM success !".format(sn_info_list["RACKSN"],sn_info_list["sn"]))
+                                else:
+                                    sendlog("[RACKSN:{0} SN:{1}] Copy image from TFTP to RM fail !".format(sn_info_list["RACKSN"],sn_info_list["sn"]))
+                                    return 1
+                            else:
+                                sendlog("[RACKSN:{0} SN:{1}] Can not get result - copy image from TFTP to RM".format(sn_info_list["RACKSN"],sn_info_list["sn"]))
+                                return 1
+                    else:
+                        sendlog("overlake md5sum check successfully!! get: {0}  expect: {1}".format(get_md5, overlake_md5), 0, log_path)
+                sendlog("[RACKSN:{0} SN:{1}] {2} image from TFTP to RM success !".format(sn_info_list["RACKSN"],sn_info_list["sn"], upgrade_image.format(sn_info_list["CP_SOC_OS_FW"])))
             else:
                 #Copy image from TFTP to RM
-                ret, res = send_cmd_to_rm(ssh_object, sn_info_list, g_cmd_copy_image_to_rm.format(tftp_ip, image_path, upgrade_image.format(sn_info_list["CP_SOC_OS_FW"])), 200, )
+                ret, res = send_cmd_to_rm(ssh_object, sn_info_list, g_cmd_copy_image_to_rm.format(tftp_ip, image_path, upgrade_image.format(sn_info_list["CP_SOC_OS_FW"])), 200, log_path)
                 if ret != 0:
                     return 1
                 else:
                     if res != "":
                         if is_success(res):
-                            print("[RACKSN:{0} SN:{1}] Copy image from TFTP to RM success !".format(sn_info_list["RACKSN"],sn_info_list["sn"]))
+                            os.system("touch {0}".format(upload_img_flag))
+                            sendlog("[RACKSN:{0} SN:{1}] Copy image from TFTP to RM success !".format(sn_info_list["RACKSN"],sn_info_list["sn"]))
                         else:
-                            print("[RACKSN:{0} SN:{1}] Copy image from TFTP to RM fail !".format(sn_info_list["RACKSN"],sn_info_list["sn"]))
+                            sendlog("[RACKSN:{0} SN:{1}] Copy image from TFTP to RM fail !".format(sn_info_list["RACKSN"],sn_info_list["sn"]))
                             return 1
                     else:
-                        print("[RACKSN:{0} SN:{1}] Can not get result - copy image from TFTP to RM".format(sn_info_list["RACKSN"],sn_info_list["sn"]))
+                        sendlog("[RACKSN:{0} SN:{1}] Can not get result - copy image from TFTP to RM".format(sn_info_list["RACKSN"],sn_info_list["sn"]))
                         return 1
         else:
-            print("[RACKSN:{0} SN:{1}] Can not get result - check image on SoC".format(sn_info_list["RACKSN"],sn_info_list["sn"]))
+            sendlog("[RACKSN:{0} SN:{1}] Can not get result - check image on SoC".format(sn_info_list["RACKSN"],sn_info_list["sn"]))
             return 1
-    
+
     #Mount image on SoC
     ret, res = send_cmd_to_rm(ssh_object, sn_info_list, g_cmd_mount_image_on_soc.format(sn_info_list["uut_to_rm_port"], upgrade_image.format(sn_info_list["CP_SOC_OS_FW"])), 20, )
     if ret != 0:
