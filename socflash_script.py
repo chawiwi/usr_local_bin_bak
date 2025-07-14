@@ -387,7 +387,8 @@ def read_sn_info_from_config(file_name):
             "master_rm_port": "NA",
             "is_dict_info_correct": True,
             "is_need_cerberus_update": False,
-            "is_reconfig": True
+            "is_reconfig": True,
+            "is_GP":False
         }
         rackpn = ""
         rm_mac1 = ""
@@ -482,8 +483,15 @@ def read_sn_info_from_config(file_name):
                 if "FPGASN" in line:
                     SNdict["CP_SN"] = line.split('=')[1].strip()
                 
+                # Arbitrary GP line to have script skip C229D. KA 20250630
+                if "GP_CERBERUS_FW" in line:
+                    SNdict["is_GP"] = True
             f.close()
             
+            if SNdict["is_GP"]:
+                sendlog("GP card recognized, skip for {0}".format(SNdict["sn"]))
+                return 1
+
             #Check rackpn
             if rackpn == "":
                 print("rackpn get fail ({0}.txt).".format(SNdict["sn"]),"FAIL")
